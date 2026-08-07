@@ -1,0 +1,23 @@
+[project]
+name = "travel-agent-v4"
+version = "0.1.0"
+description = "智能旅游助手 v4（Deep Agents 框架版）— Week 1：最小 Deep Agent 通用问答（CLI）"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic-settings>=2.0",
+    "tavily>=0.5",
+    "httpx>=0.27",
+    "langchain>=1.0",
+    "langchain-deepseek>=1.0",
+    "langgraph>=1.0",
+    "deepagents>=0.7.4",
+    "typer>=0.12",
+    "rich>=13.7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["__init__.py", "agent.py", "cli.py", "config.py", "tools"]
