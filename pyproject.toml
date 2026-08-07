@@ -25,6 +25,7 @@ only-include = ["__init__.py", "agent.py", "cli.py", "config.py", "tools"]
 
 [dependency-groups]
 dev = [
+    "debugpy>=1.8.21",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
 ]
