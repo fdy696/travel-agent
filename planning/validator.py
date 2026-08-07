@@ -1,12 +1,10 @@
 """PlanDraft 的纯代码校验器。"""
 from __future__ import annotations
 
-import re
 from collections import Counter
+from datetime import time, timedelta
 
 from planning.models import PlanDraft, ValidationIssue
-
-_TIME_RE = re.compile(r"^(\d{2}):(\d{2})$")
 
 
 def validate_plan(plan: PlanDraft) -> list[ValidationIssue]:
@@ -49,7 +47,6 @@ def _check_dates(plan: PlanDraft, issues: list[ValidationIssue]) -> None:
     start = plan.requirements.start_date
     if start is None:
         return
-    from datetime import timedelta
 
     for index, day in enumerate(plan.schedule):
         expected = start + timedelta(days=index)
@@ -64,18 +61,22 @@ def _check_dates(plan: PlanDraft, issues: list[ValidationIssue]) -> None:
             )
 
 def _check_unique_ids(plan: PlanDraft, issues: list[ValidationIssue]) -> None:
-    ids: list[tuple[str, str]] = []
+    values_by_kind: dict[str, list[str]] = {
+        "day_id": [],
+        "activity_id": [],
+        "trans_id": [],
+        "acc_id": [],
+    }
     for day in plan.schedule:
-        ids.append(("day_id", day.day_id))
+        values_by_kind["day_id"].append(day.day_id)
         for activity in day.activities:
-            ids.append(("activity_id", activity.activity_id))
+            values_by_kind["activity_id"].append(activity.activity_id)
         for trans in day.transportation:
-            ids.append(("trans_id", trans.trans_id))
+            values_by_kind["trans_id"].append(trans.trans_id)
         if day.accommodation:
-            ids.append(("acc_id", day.accommodation.acc_id))
+            values_by_kind["acc_id"].append(day.accommodation.acc_id)
 
-    for kind in ("day_id", "activity_id", "trans_id", "acc_id"):
-        values = [value for current_kind, value in ids if current_kind == kind]
+    for kind, values in values_by_kind.items():
         if any(not value for value in values):
             issues.append(
                 ValidationIssue(
@@ -168,13 +169,11 @@ def _check_budget(plan: PlanDraft, issues: list[ValidationIssue]) -> None:
 
 
 def _to_minutes(value: str) -> int | None:
-    match = _TIME_RE.match(value.strip())
-    if not match:
+    try:
+        parsed = time.fromisoformat(value.strip())
+    except ValueError:
         return None
-    hour, minute = int(match.group(1)), int(match.group(2))
-    if hour > 23 or minute > 59:
-        return None
-    return hour * 60 + minute
+    return parsed.hour * 60 + parsed.minute
 
 
 def _check_activity_times(plan: PlanDraft, issues: list[ValidationIssue]) -> None:

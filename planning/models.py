@@ -171,32 +171,26 @@ def merge_requirements(
     patch: RequirementsPatch,
 ) -> TravelRequirements:
     """把本轮增量合并到已有需求，并归一化日期/默认值。"""
-    updates: dict[str, object] = {}
+    updates: dict[str, object] = dict(current.model_dump())
     for field_name in RequirementsPatch.model_fields:
         value = getattr(patch, field_name)
         if value is not None:
             updates[field_name] = value
 
-    merged = current.model_copy(update=updates)
-
     # 日期范围一旦完整，以日期计算的天数为准（包含首尾两天）。
-    if merged.start_date and merged.end_date:
-        merged = merged.model_copy(
-            update={"duration_days": (merged.end_date - merged.start_date).days + 1}
-        )
+    start_date, end_date = updates.get("start_date"), updates.get("end_date")
+    if start_date and end_date:
+        updates["duration_days"] = (end_date - start_date).days + 1
 
-    if merged.pace is None:
-        merged = merged.model_copy(update={"pace": "moderate"})
+    if updates.get("pace") is None:
+        updates["pace"] = "moderate"
 
     # 去重但保持用户顺序。
-    merged = merged.model_copy(
-        update={
-            "destinations": _dedupe(merged.destinations),
-            "must_visit": _dedupe(merged.must_visit),
-            "exclude": _dedupe(merged.exclude),
-        }
-    )
-    return TravelRequirements.model_validate(merged.model_dump())
+    updates["destinations"] = _dedupe(updates["destinations"])
+    updates["must_visit"] = _dedupe(updates["must_visit"])
+    updates["exclude"] = _dedupe(updates["exclude"])
+
+    return TravelRequirements.model_validate(updates)
 
 
 def missing_required_fields(requirements: TravelRequirements) -> list[str]:

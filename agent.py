@@ -97,6 +97,23 @@ def build_agent():
         runnable=planning_graph,
     )
 
+    # 传入 subagents=[...] 会让 create_deep_agent 自动挂上 SubAgentMiddleware，
+    # 由它向主 agent 注入一个名为 `task` 的 StructuredTool（这个工具不是我们写的）。
+    #
+    # task 工具的入参 schema 只有两个字段（TaskToolSchema）：
+    #   - description   : str，主 agent 把「本轮规划信息 + 已有关键上下文」写进来；
+    #   - subagent_type : str，固定填 "travel-planning"。
+    #
+    # 主 agent 发出 task 工具调用后，middleware 的处理链路是：
+    #   1. 用 description 构造本图唯一的输入消息 HumanMessage(description)；
+    #   2. 把主 agent 的 runtime context（TravelRuntimeContext）从父 run 透传到
+    #      本图 —— 因此 planning_graph 的 load_task 节点能拿到 user_id/session_id
+    #      去 SQLite 定位/续接已保存的 planning task；
+    #   3. 本图执行完只返回 messages，middleware 取最后一条非空 AIMessage 文本，
+    #      包成 ToolMessage 交还给主 agent；research/draft 等中间状态不污染主线程。
+    #
+    # 主 agent 对 planning 的具体调用方式见 TRAVEL_AGENT_SYSTEM_PROMPT；
+    # 图的输入/输出契约见 planning/workflow.py 的模块 docstring。
     return create_deep_agent(
         model=llm,
         system_prompt=TRAVEL_AGENT_SYSTEM_PROMPT,

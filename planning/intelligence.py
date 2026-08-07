@@ -4,7 +4,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import datetime
 from typing import Protocol
@@ -66,6 +65,10 @@ class LLMPlanningIntelligence:
             PlanDraft,
             method="json_mode",
         )
+        # schema 在 __init__ 序列化一次，避免每次调用重复 model_json_schema()。
+        self._requirements_schema = _schema_text(RequirementsPatch)
+        self._research_schema = _schema_text(ResearchResult)
+        self._plan_schema = _schema_text(PlanDraft)
         # Research needs tool calling and structured parsing, but combining both
         # in create_agent makes the provider choose a tool_choice for the final
         # response. Keep the tool loop text-based and parse it in a separate call.
@@ -103,7 +106,7 @@ class LLMPlanningIntelligence:
                         f"今天是 {today}。\n"
                         f"已有需求：{current.model_dump_json()}\n"
                         f"用户本轮输入：{user_text}\n"
-                        f"请按此 JSON Schema 输出：{_schema_text(RequirementsPatch)}"
+                        f"请按此 JSON Schema 输出：{self._requirements_schema}"
                     )
                 ),
             ],
@@ -150,7 +153,7 @@ class LLMPlanningIntelligence:
                         content=(
                             f"需求：{requirements.model_dump_json()}\n"
                             f"研究报告：{report}\n"
-                            f"请按此 JSON Schema 输出：{_schema_text(ResearchResult)}"
+                            f"请按此 JSON Schema 输出：{self._research_schema}"
                         )
                     ),
                 ],
@@ -174,7 +177,7 @@ class LLMPlanningIntelligence:
                         "根据以下已确认需求和研究信息生成完整结构化行程。\n"
                         f"requirements={requirements.model_dump_json()}\n"
                         f"research={research.model_dump_json()}\n"
-                        f"请按此 JSON Schema 输出：{_schema_text(PlanDraft)}"
+                        f"请按此 JSON Schema 输出：{self._plan_schema}"
                     )
                 ),
             ],
@@ -206,7 +209,7 @@ class LLMPlanningIntelligence:
                         f"research={research.model_dump_json()}\n"
                         f"draft={draft.model_dump_json()}\n"
                         f"issues={json.dumps([i.model_dump() for i in issues], ensure_ascii=False)}\n"
-                        f"请按此 JSON Schema 输出：{_schema_text(PlanDraft)}"
+                        f"请按此 JSON Schema 输出：{self._plan_schema}"
                     )
                 ),
             ],
@@ -215,19 +218,14 @@ class LLMPlanningIntelligence:
 
 
     async def _invoke_json(self, model, messages):
-        """Retry provider-level empty/invalid JSON responses once."""
-        last_error: Exception | None = None
-        for attempt in range(2):
-            try:
-                result = await model.ainvoke(messages)
-                if result is None:
-                    raise RuntimeError("JSON mode returned empty content")
-                return result
-            except Exception as exc:
-                last_error = exc
-                if attempt == 0:
-                    await asyncio.sleep(0)
-        raise RuntimeError(f"JSON mode failed after retry: {last_error}") from last_error
+        """DeepSeek JSON mode 偶发返回空 content；重试一次，其他异常直接抛给上层。"""
+        result = await model.ainvoke(messages)
+        if result is not None:
+            return result
+        result = await model.ainvoke(messages)
+        if result is None:
+            raise RuntimeError("JSON mode returned empty content twice")
+        return result
 
 
 def _schema_text(model: type[BaseModel]) -> str:

@@ -152,20 +152,11 @@ class SQLitePlanningRepository:
         requirements: TravelRequirements,
         state: str = "collecting",
     ) -> PlanningTask:
-        now = _now()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE planning_tasks
-                SET requirements_json = ?, state = ?, last_error_code = NULL, updated_at = ?
-                WHERE task_id = ?
-                """,
-                (requirements.model_dump_json(), state, now.isoformat(), task_id),
-            )
-        task = self.get_task(task_id)
-        if task is None:
-            raise KeyError(f"planning task not found: {task_id}")
-        return task
+        return self._update_and_read(
+            task_id,
+            "requirements_json = ?, state = ?, last_error_code = NULL",
+            (requirements.model_dump_json(), state),
+        )
 
     def mark_task_state(
         self,
@@ -175,30 +166,37 @@ class SQLitePlanningRepository:
         error_code: str | None = None,
         repair_count: int | None = None,
     ) -> PlanningTask:
-        now = _now()
+        if repair_count is None:
+            return self._update_and_read(
+                task_id,
+                "state = ?, last_error_code = ?",
+                (state, error_code),
+            )
+        return self._update_and_read(
+            task_id,
+            "state = ?, last_error_code = ?, repair_count = ?",
+            (state, error_code, repair_count),
+        )
+
+    def _update_and_read(
+        self,
+        task_id: str,
+        set_clause: str,
+        params: tuple,
+    ) -> PlanningTask:
+        """同一连接内 UPDATE 并回读，避免写后重开连接的重复 I/O。"""
         with self._connect() as conn:
-            if repair_count is None:
-                conn.execute(
-                    """
-                    UPDATE planning_tasks
-                    SET state = ?, last_error_code = ?, updated_at = ?
-                    WHERE task_id = ?
-                    """,
-                    (state, error_code, now.isoformat(), task_id),
-                )
-            else:
-                conn.execute(
-                    """
-                    UPDATE planning_tasks
-                    SET state = ?, last_error_code = ?, repair_count = ?, updated_at = ?
-                    WHERE task_id = ?
-                    """,
-                    (state, error_code, repair_count, now.isoformat(), task_id),
-                )
-        task = self.get_task(task_id)
-        if task is None:
+            conn.execute(
+                f"UPDATE planning_tasks SET {set_clause}, updated_at = ? WHERE task_id = ?",
+                (*params, _now().isoformat(), task_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM planning_tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        if row is None:
             raise KeyError(f"planning task not found: {task_id}")
-        return task
+        return self._task_from_row(row)
 
     def create_plan_v1(
         self,

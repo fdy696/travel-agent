@@ -1,7 +1,22 @@
-"""旅游规划 LangGraph Workflow（Week 2）。"""
+"""旅游规划 LangGraph Workflow（Week 2）。
+
+本图不是独立入口，而是作为 CompiledSubAgent 的 runnable 挂到主 Deep Agent 上，
+因此它的输入/输出契约由主 agent 侧的 task 工具（SubAgentMiddleware）决定：
+
+输入（每轮调用只有这两样，中间状态跨轮靠 SQLite 恢复）：
+- messages：唯一一条 HumanMessage，内容是主 agent 本轮 task 工具调用时填的
+  description 参数（见 _last_human_text 的说明）；
+- runtime.context：主 agent 的 TravelRuntimeContext(user_id, session_id)，
+  由 LangGraph 从父 run 透传，_load_task 用它定位/续接已保存的 planning task。
+
+输出（output_schema=MessagesState 只交还 messages）：
+- 最后一条非空 AIMessage 文本会被 middleware 取走，包成 ToolMessage 交还主 agent，
+  再由主 agent 转达给用户；本图内部的 task_id / research / draft 等字段不会回传。
+"""
 from __future__ import annotations
 
 import asyncio
+from functools import wraps
 from typing import Literal
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
@@ -37,6 +52,22 @@ class PlanningState(MessagesState, total=False):
     error_message: str
 
 
+def _guarded(error_code: str):
+    """把节点内异常统一转成 error_code/error_message 返回，收敛重复的 try/except。"""
+
+    def deco(fn):
+        @wraps(fn)
+        async def wrapper(state: PlanningState, *args, **kwargs):
+            try:
+                return await fn(state, *args, **kwargs)
+            except Exception as exc:
+                return {"error_code": error_code, "error_message": str(exc)}
+
+        return wrapper
+
+    return deco
+
+
 def build_planning_graph(
     *,
     intelligence: PlanningIntelligence,
@@ -46,6 +77,10 @@ def build_planning_graph(
         state: PlanningState,
         runtime: Runtime[TravelRuntimeContext],
     ) -> dict:
+        # runtime.context 是主 agent 调用时的 context= 参数，由 LangGraph 从父 run
+        # 透传到本子图（task 工具的入参里并不带它）。跨轮续接也依赖这里：
+        # 本子图每次调用都是全新的，不持有对话历史，只有靠 user_id/session_id
+        # 从 SQLite 重新加载上次已收集的 requirements 才能继续。
         user_id = runtime.context.user_id
         session_id = runtime.context.session_id
         task = await asyncio.to_thread(
@@ -61,44 +96,34 @@ def build_planning_graph(
             "error_message": "",
         }
 
+    @_guarded("REQUIREMENTS_EXTRACTION_FAILED")
     async def extract_requirements(state: PlanningState) -> dict:
         user_text = _last_human_text(state["messages"])
-        try:
-            patch = await intelligence.extract_requirements(
-                user_text=user_text,
-                current=state["requirements"],
-            )
-            merged = merge_requirements(state["requirements"], patch)
-            return {"requirements": merged}
-        except Exception as exc:
-            return {
-                "error_code": "REQUIREMENTS_EXTRACTION_FAILED",
-                "error_message": str(exc),
-            }
+        patch = await intelligence.extract_requirements(
+            user_text=user_text,
+            current=state["requirements"],
+        )
+        return {"requirements": merge_requirements(state["requirements"], patch)}
 
     async def check_requirements(state: PlanningState) -> dict:
         if state.get("error_code"):
             return {}
         requirements = state["requirements"]
         missing = missing_required_fields(requirements)
-        if missing:
-            await asyncio.to_thread(
-                repository.update_requirements,
-                task_id=state["task_id"],
-                requirements=requirements,
-                state="collecting",
-            )
-            return {"missing_fields": missing}
-
+        state_label = "collecting" if missing else "processing"
         await asyncio.to_thread(
             repository.update_requirements,
             task_id=state["task_id"],
             requirements=requirements,
-            state="processing",
+            state=state_label,
         )
-        return {"missing_fields": []}
+        return {"missing_fields": missing}
 
     async def respond_need_more(state: PlanningState) -> dict:
+        # 需求不全时提前结束（走 END）。这里返回的 AIMessage 会被 middleware 取为
+        # 最后一条非空 AI 文本，包成 ToolMessage 交还主 agent，由主 agent 把这里的
+        # 问题转达给用户。用户后续补充的信息，主 agent 会在下一轮重新委派并写进
+        # description —— 本子图自己不会记住上一轮问了什么。
         question = _missing_question(state.get("missing_fields", []))
         return {
             "messages": [
@@ -111,34 +136,23 @@ def build_planning_graph(
             ]
         }
 
+    @_guarded("RESEARCH_FAILED")
     async def research(state: PlanningState) -> dict:
-        try:
-            result = await intelligence.research(state["requirements"])
-            if not result.has_useful_data():
-                return {
-                    "error_code": "RESEARCH_EMPTY",
-                    "error_message": "旅游研究没有获得可用数据。",
-                }
-            return {"research": result}
-        except Exception as exc:
+        result = await intelligence.research(state["requirements"])
+        if not result.has_useful_data():
             return {
-                "error_code": "RESEARCH_FAILED",
-                "error_message": str(exc),
+                "error_code": "RESEARCH_EMPTY",
+                "error_message": "旅游研究没有获得可用数据。",
             }
+        return {"research": result}
 
+    @_guarded("PLAN_GENERATION_FAILED")
     async def generate(state: PlanningState) -> dict:
-        try:
-            draft = await intelligence.generate_plan(
-                requirements=state["requirements"],
-                research=state["research"],
-            )
-            draft = normalize_plan_draft(draft, state["requirements"])
-            return {"plan_draft": draft}
-        except Exception as exc:
-            return {
-                "error_code": "PLAN_GENERATION_FAILED",
-                "error_message": str(exc),
-            }
+        draft = await intelligence.generate_plan(
+            requirements=state["requirements"],
+            research=state["research"],
+        )
+        return {"plan_draft": normalize_plan_draft(draft, state["requirements"])}
 
     async def validate(state: PlanningState) -> dict:
         issues = validate_plan(state["plan_draft"])
@@ -168,26 +182,21 @@ def build_planning_graph(
                 "error_message": str(exc),
             }
 
+    @_guarded("PLAN_PERSIST_FAILED")
     async def persist(
         state: PlanningState,
         runtime: Runtime[TravelRuntimeContext],
     ) -> dict:
         user_id = runtime.context.user_id
         session_id = runtime.context.session_id
-        try:
-            plan = await asyncio.to_thread(
-                repository.create_plan_v1,
-                task_id=state["task_id"],
-                user_id=user_id,
-                session_id=session_id,
-                draft=state["plan_draft"],
-            )
-            return {"plan": plan}
-        except Exception as exc:
-            return {
-                "error_code": "PLAN_PERSIST_FAILED",
-                "error_message": str(exc),
-            }
+        plan = await asyncio.to_thread(
+            repository.create_plan_v1,
+            task_id=state["task_id"],
+            user_id=user_id,
+            session_id=session_id,
+            draft=state["plan_draft"],
+        )
+        return {"plan": plan}
 
     async def finish(state: PlanningState) -> dict:
         plan = state["plan"]
@@ -218,6 +227,10 @@ def build_planning_graph(
             ]
         }
 
+    def _after(state: PlanningState, next_node: str) -> str:
+        """节点出错走 fail，否则继续 next_node；收敛四个相同的条件路由。"""
+        return "fail" if state.get("error_code") else next_node
+
     def route_after_check(state: PlanningState) -> Literal["fail", "respond_need_more", "research"]:
         if state.get("error_code"):
             return "fail"
@@ -225,24 +238,12 @@ def build_planning_graph(
             return "respond_need_more"
         return "research"
 
-    def route_after_research(state: PlanningState) -> Literal["fail", "generate"]:
-        return "fail" if state.get("error_code") else "generate"
-
-    def route_after_generate(state: PlanningState) -> Literal["fail", "validate"]:
-        return "fail" if state.get("error_code") else "validate"
-
     def route_after_validate(state: PlanningState) -> Literal["persist", "repair", "fail"]:
         if not state.get("validation_issues"):
             return "persist"
         if state.get("repair_count", 0) < 2:
             return "repair"
         return "fail"
-
-    def route_after_repair(state: PlanningState) -> Literal["fail", "validate"]:
-        return "fail" if state.get("error_code") else "validate"
-
-    def route_after_persist(state: PlanningState) -> Literal["fail", "finish"]:
-        return "fail" if state.get("error_code") else "finish"
 
     graph = StateGraph(
         PlanningState,
@@ -266,11 +267,11 @@ def build_planning_graph(
     graph.add_edge("extract_requirements", "check_requirements")
     graph.add_conditional_edges("check_requirements", route_after_check)
     graph.add_edge("respond_need_more", END)
-    graph.add_conditional_edges("research", route_after_research)
-    graph.add_conditional_edges("generate", route_after_generate)
+    graph.add_conditional_edges("research", lambda s: _after(s, "generate"))
+    graph.add_conditional_edges("generate", lambda s: _after(s, "validate"))
     graph.add_conditional_edges("validate", route_after_validate)
-    graph.add_conditional_edges("repair", route_after_repair)
-    graph.add_conditional_edges("persist", route_after_persist)
+    graph.add_conditional_edges("repair", lambda s: _after(s, "validate"))
+    graph.add_conditional_edges("persist", lambda s: _after(s, "finish"))
     graph.add_edge("finish", END)
     graph.add_edge("fail", END)
 
@@ -278,6 +279,10 @@ def build_planning_graph(
 
 
 def _last_human_text(messages: list[BaseMessage]) -> str:
+    # 本图每轮只收到一条 HumanMessage：task 工具的 middleware 用 description 参数
+    # 构造（见 SubAgentMiddleware._validate_and_prepare_state）。所以取最后一条
+    # HumanMessage 就是主 agent 本轮委派时写的 description，里面已包含用户本轮
+    # 的原始规划信息 + 主 agent 补上的关键上下文。
     for message in reversed(messages):
         if isinstance(message, HumanMessage):
             if isinstance(message.content, str):
