@@ -1,121 +1,108 @@
-"""主 Agent 构建（v4 / Deep Agents / Week 1）。
+"""主 Agent 构建（v4.1 / Deep Agents / Week 2）。
 
-Week 1 目标（对应文档第 11 节）：最小 Deep Agent —— 主 Agent + get_weather / search 工具，
-通用问答跑通（CLI 模式）。暂不启用：Subagent（规划）、虚拟文件系统、permissions、memory、
-interrupt_on、中间件——这些属于 Week 2+。
+Week 2：在 Week 1 通用问答基础上，加入 travel-planning CompiledSubAgent，
+内部由 LangGraph Workflow 完成需求收集 → research → generate → validate → repair → persist。
 
-核心哲学（文档 1.2）：不重新造轮子，把业务逻辑聚焦在 Prompt 和 Tool 契约上。
-
-注意：docstring 就是给 LLM 看的"说明书"——写清楚适用场景与参数含义，
-直接决定模型选对工具的概率。
+业务 Plan/PlanningTask 使用 Repository 持久化；CLI 阶段默认 SQLite，生产环境再替换 PostgreSQL。
 """
 from __future__ import annotations
 
-from deepagents import create_deep_agent
-from langchain_core.tools import tool
+from deepagents import CompiledSubAgent, create_deep_agent
 from langchain_deepseek import ChatDeepSeek
+from langgraph.checkpoint.memory import InMemorySaver
 
 from config import get_settings, require_key
-from tools.route import get_route as _get_route
-from tools.search import SearchDepth, SearchTopic, search_web as _search_web
-from tools.weather import get_weather as _get_weather
+from planning.intelligence import LLMPlanningIntelligence
+from planning.repository import SQLitePlanningRepository
+from planning.workflow import build_planning_graph
+from planning.runtime import TravelRuntimeContext
+from tools.agent_tools import TRAVEL_TOOLS
 
 
-# ── 业务工具（@tool 包装底层 API 实现）──────────────────────────────
+TRAVEL_AGENT_SYSTEM_PROMPT = """你是“行伴”旅游助手，一位专业、贴心、务实的旅行伙伴。
 
-@tool
-async def get_weather(city: str, forecast: bool = False) -> str:
-    """查询一个城市的当前天气；forecast=True 时同时返回未来 3 天预报。
+# 通用问答
+- 闲聊、旅游常识可以直接回答。
+- 天气、交通、价格、营业时间、攻略等实时/可变信息必须调用对应工具后回答。
+- 查当前/近 3 天天气用 get_weather；更远日期的季节气候用 search_travel_info。
+- 查路线、距离、耗时用 search_maps。
 
-    用户问天气、气温、适不适合出行、穿什么衣服时使用。
+# 完整旅游行程规划
+当用户要求“规划/安排/制定一个多日行程”，必须通过 task 委派给 subagent_type="travel-planning"。
+不要自己在主 Agent 中逐步生成完整多日计划。
 
-    Args:
-        city: 城市名，如 "北京"、"上海"、"丽江"
-        forecast: 是否返回未来 3 天预报（规划行程、决定带什么衣服时建议 True）
-    """
-    return await _get_weather(city, forecast)
+以下情况也必须继续委派给 travel-planning：
+- 上一轮 travel-planning 提示缺少必要信息，本轮用户补充人数/日期/天数/目的地等；
+- 用户对尚未完成的首次规划补充或纠正需求。
 
+调用 travel-planning 时：
+- description 要包含用户本轮与规划有关的原始信息；
+- 如果当前对话里已有关键规划上下文，也一并简洁带上；
+- 不要使用 general-purpose 子 Agent 替代 travel-planning。
 
-@tool
-async def search_travel_info(
-    query: str,
-    max_results: int = 5,
-    topic: SearchTopic = "general",
-    search_depth: SearchDepth = "advanced",
-) -> str:
-    """联网搜索实时旅游信息。
+travel-planning 返回“还需要信息”时，把它的问题自然地转达给用户，不要自行创造另一套追问。
+travel-planning 返回完整计划时，以其结果为事实主体，可以改善排版，但不要擅自改变行程事实。
 
-    需要景点推荐、攻略、美食、门票价格、住宿、当地新闻、出发前注意事项等
-    不在知识库里的实时信息时使用；要查当地最新动态、突发新闻时，用 topic="news"。
-    默认只在主流旅游站点（携程/马蜂窝/穷游/大众点评/小红书等）内搜索，质量更稳。
-
-    Args:
-        query: 搜索词，写具体一些效果更好，如"丽江 3天 旅游攻略"
-        max_results: 返回结果条数
-        topic: general（综合）/ news（新闻，查当地最新动态时用）
-        search_depth: basic（快）/ advanced（深，查详细攻略、价格对比时建议用）
-    """
-    return _search_web(query, max_results, topic, search_depth)
-
-
-@tool
-async def search_maps(origin: str, destination: str, mode: str = "driving") -> str:
-    """查询两个地点之间的路线（驾车或公交），返回距离、耗时和逐向指引。
-
-    用户问"怎么去、多远、多久、坐什么车"时使用。
-
-    Args:
-        origin: 起点地址，如 "北京西站"
-        destination: 终点地址，如 "北京首都国际机场"
-        mode: driving（驾车）/ transit（公交）
-    """
-    return await _get_route(origin, destination, mode)
-
-
-TRAVEL_TOOLS = [
-    get_weather,
-    search_travel_info,
-    search_maps,
-]
-
-
-# ── 主 Agent System Prompt（文档第 7 节骨架，裁剪到 Week 1 的通用问答范围）──
-
-TRAVEL_AGENT_SYSTEM_PROMPT = """你是"行伴"旅游助手，一位专业、贴心的旅行规划伙伴。
-
-# 你的能力
-- 普通对话：闲聊、旅游建议、常识问答，直接回答即可。
-- 查天气：调用 get_weather。用户问天气、气温、适不适合出行时使用。
-  若涉及未来几天出行，传 forecast=True 获取预报。
-- 查攻略/景点/美食/价格：调用 search_travel_info。需要实时信息时，先联网再回答。
-- 查路线/交通：调用 search_maps。用户问"怎么去、多远、多久、坐什么车"时使用。
-
-# 工具使用规则
-- 涉及实时、可变的信息（天气、交通、价格、攻略、营业时间），必须先调工具，不要凭记忆编造。
-- 一次只问清必要的信息。比如用户没说目的地，先问，再查。
-- 简单常识问题直接回答，不必调工具。
+# 边界
+- 用户只是问某地天气/攻略/路线，不要启动完整规划。
+- Week 2 暂不支持对已交付计划做版本化局部修改；若用户要求修改，可以说明当前版本尚未开放该能力。
+- 不暴露内部工具名、subagent 名、task_id、plan_id 等技术细节。
 
 # 回复风格
-- 简洁、直接、口语化，像朋友聊天，不要罗列晦涩术语。
-- 天气、交通信息可能有时效性，回答末尾可提醒用户出发前再确认。
-- 不要暴露内部工具名或技术细节。"""
+- 简洁、直接、口语化。
+- 不编造实时事实。
+- 一次只追问真正阻塞任务的信息。
+"""
 
 
-def build_agent():
-    """构建主 Deep Agent（进程内懒加载，供 CLI / 后续 API 复用）。
-
-    模型用与现有 backend 一致的 DeepSeek（v4 文档示例为 claude-sonnet-4，
-    如需切换改 CHAT_MODEL + 对应 key 即可）。
-    """
-    llm = ChatDeepSeek(
+def _build_llm() -> ChatDeepSeek:
+    return ChatDeepSeek(
         model=get_settings().CHAT_MODEL,
         api_key=require_key("DEEPSEEK_API_KEY"),
         temperature=0.3,
-        max_retries=3,  # 指数退避重试
+        max_tokens=16384,
+        max_retries=3,
+        extra_body={
+            "thinking": {
+                "type": "disabled",
+            }
+        },
     )
+
+
+def build_agent():
+    """构建 Week 2 主 Deep Agent。
+
+    - Main Agent：Deep Agents ReAct / Tool Calling
+    - Planning：CompiledSubAgent + LangGraph Workflow
+    - 会话消息：InMemorySaver（仅 CLI/开发；生产需持久化 checkpointer）
+    - 业务状态：SQLitePlanningRepository（CLI/MVP；生产替换 PostgreSQL）
+    """
+    llm = _build_llm()
+    repository = SQLitePlanningRepository()
+    intelligence = LLMPlanningIntelligence(llm)
+    planning_graph = build_planning_graph(
+        intelligence=intelligence,
+        repository=repository,
+    )
+
+    planning_subagent = CompiledSubAgent(
+        name="travel-planning",
+        description=(
+            "创建或继续一次完整的多日旅游行程规划。"
+            "用于用户明确要求规划/安排/制定行程，或继续补充正在收集的规划需求。"
+            "会自行持久化已收集需求，并在信息充足后完成研究、生成、校验和首次计划保存。"
+            "不要用于简单天气/攻略/路线问答，也不要用于已交付计划的局部修改。"
+        ),
+        runnable=planning_graph,
+    )
+
     return create_deep_agent(
         model=llm,
         system_prompt=TRAVEL_AGENT_SYSTEM_PROMPT,
         tools=TRAVEL_TOOLS,
+        subagents=[planning_subagent],
+        checkpointer=InMemorySaver(),
+        context_schema=TravelRuntimeContext,
         name="travel_agent",
     )

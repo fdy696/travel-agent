@@ -1,75 +1,79 @@
-"""v4 Week 1 CLI：通用问答交互入口（REPL / 单次问答）。
+"""v4.1 Week 2 CLI：通用问答 + 多轮首次行程规划。
 
 用法（在 backend_v4 目录下）：
-  uv run python -m cli                            # 交互式 REPL
-  uv run python -m cli --message "北京天气怎么样"    # 单次问答（供冒烟测试）
+  uv run python -m cli
+  uv run python -m cli --message "帮我规划云南5日游，2个人"
+  uv run python -m cli --session-id demo-001
 
-交互命令：
-  - 直接输入问题 → 得到回答
-  - 输入 /quit /exit /q 或 退出 → 结束
-
-实现基于 typer + rich（不手写 CLI）：参数解析交给 typer，输出交给 rich。
-编码兜底：把 stdout/stderr 重配置为 UTF-8 + errors="replace"，LLM 回复里偶发的
-非法字符（孤立代理项/emoji）会被安全替换为 "?"，而不是抛 UnicodeEncodeError 崩溃。
+Week 2 使用 InMemorySaver 保持当前进程中的对话上下文；PlanningTask/Plan V1
+另存 SQLite，因此业务数据不会跟随一次 LLM 调用消失。
 """
 from __future__ import annotations
 
 import asyncio
 import sys
+import uuid
 
 import typer
 from rich.console import Console
 from rich.prompt import Prompt
 
 from agent import build_agent
+from planning.runtime import TravelRuntimeContext
 
-# Windows 控制台默认 GBK；统一重配置为 UTF-8，非法字符替换为 "?" 而非崩溃
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, ValueError):
-        pass  # 非 TTY / 已配置时跳过
+        pass
 
 app = typer.Typer(
     name="travel-agent",
-    help="行伴旅游助手（v4 / Deep Agents / Week 1）",
+    help="行伴旅游助手（v4.1 / Deep Agents / Week 2）",
     no_args_is_help=False,
 )
 console = Console()
-
 QUIT_WORDS = ("/quit", "/exit", "/q", "退出")
 
 
 def _clean(text: str) -> str:
-    """剔除字符串里的孤立代理项，避免 utf-8 严格编码时抛 UnicodeEncodeError。
-
-    LLM 回复里偶发的 emoji 在管线里可能被解码成代理项；若某个代理项被截断成
-    孤立半段（如 \\udc80），任何 utf-8 严格编码都会报 "surrogates not allowed"。
-    这里先把整串按 utf-8（errors=replace）编码再解码回来，把坏字符替换成 "?"，
-    保证后续打印永不崩溃（rich 内部编码路径不一定继承 stdout 的 errors="replace"）。
-    """
     if not isinstance(text, str):
         return str(text)
     return text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
 
 
 def _error(msg: str) -> None:
-    """红色错误提示；动态内容走 markup=False，避免回复里的 [ ] 被误当标记。"""
     console.print("[red][错误][/red]", end=" ")
     console.print(msg, markup=False)
 
 
-async def ask(agent, question: str) -> str:
-    """单轮问答。"""
-    result = await agent.ainvoke({"messages": [{"role": "user", "content": question}]})
+def _config(session_id: str) -> dict:
+    return {"configurable": {"thread_id": session_id}}
+
+
+def _context(session_id: str) -> TravelRuntimeContext:
+    return TravelRuntimeContext(user_id="cli-user", session_id=session_id)
+
+
+async def ask(agent, question: str, *, session_id: str) -> str:
+    result = await agent.ainvoke(
+        {"messages": [{"role": "user", "content": question}]},
+        config=_config(session_id),
+        context=_context(session_id),
+    )
     return _clean(result["messages"][-1].content)
 
 
 @app.callback(invoke_without_command=True)
 def main(
     message: str = typer.Option(None, "--message", "-m", help="单次问答，不进入交互模式"),
+    session_id: str = typer.Option(
+        None,
+        "--session-id",
+        help="会话 ID；不传则本次进程自动生成。用于调试规划任务续接。",
+    ),
 ) -> None:
-    """不带参数进入交互 REPL，带 --message 做单次问答。"""
+    session_id = session_id or f"cli-{uuid.uuid4().hex[:12]}"
     try:
         agent = build_agent()
     except Exception as e:
@@ -78,19 +82,21 @@ def main(
 
     if message:
         try:
-            reply = asyncio.run(ask(agent, message))
+            reply = asyncio.run(ask(agent, message, session_id=session_id))
         except Exception as e:
             _error(f"{type(e).__name__}: {e}")
             raise typer.Exit(1)
         console.print(reply, markup=False)
         return
 
-    asyncio.run(_repl(agent))
+    asyncio.run(_repl(agent, session_id=session_id))
 
 
-async def _repl(agent) -> None:
-    console.print("[bold]行伴旅游助手（v4 / Deep Agents / Week 1）[/bold]")
-    console.print("输入问题开始对话；输入 /quit 退出。\n")
+async def _repl(agent, *, session_id: str) -> None:
+    console.print("[bold]行伴旅游助手（v4.1 / Deep Agents / Week 2）[/bold]")
+    console.print(f"会话：{session_id}", markup=False)
+    console.print("支持通用问答与首次多轮行程规划；输入 /quit 退出。\n")
+
     while True:
         try:
             user_input = Prompt.ask("你").strip()
@@ -105,11 +111,12 @@ async def _repl(agent) -> None:
             return
 
         try:
-            reply = await ask(agent, user_input)
+            reply = await ask(agent, user_input, session_id=session_id)
         except Exception as e:
             _error(f"{type(e).__name__}: {e}")
             console.print()
             continue
+
         console.print("[bold]助手：[/bold]")
         console.print(reply, markup=False)
         console.print()
