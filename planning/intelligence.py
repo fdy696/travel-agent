@@ -49,6 +49,13 @@ class PlanningIntelligence(Protocol):
         issues: list[ValidationIssue],
     ) -> PlanDraft: ...
 
+    async def modify_plan(
+        self,
+        *,
+        current: PlanDraft,
+        instruction: str,
+    ) -> PlanDraft: ...
+
 
 class LLMPlanningIntelligence:
     def __init__(self, llm: BaseChatModel) -> None:
@@ -216,6 +223,28 @@ class LLMPlanningIntelligence:
         )
         return _as_model(result, PlanDraft)
 
+    async def modify_plan(
+        self,
+        *,
+        current: PlanDraft,
+        instruction: str,
+    ) -> PlanDraft:
+        result = await self._invoke_json(
+            self._plan_model,
+            [
+                SystemMessage(content=PLAN_MODIFICATION_SYSTEM_PROMPT),
+                HumanMessage(
+                    content=(
+                        "根据用户的自然语言修改指令，对下面已交付的行程做最小必要修改。\n"
+                        f"当前行程：{current.model_dump_json()}\n"
+                        f"修改指令：{instruction}\n"
+                        f"请按此 JSON Schema 输出：{self._plan_schema}"
+                    )
+                ),
+            ],
+        )
+        return _as_model(result, PlanDraft)
+
 
     async def _invoke_json(self, model, messages):
         """DeepSeek JSON mode 偶发返回空 content；重试一次，其他异常直接抛给上层。"""
@@ -276,4 +305,21 @@ PLAN_GENERATION_SYSTEM_PROMPT = """你是专业旅游行程生成器。
 - 不要把出发地凭空补成某个城市；origin 为空时按“当地行程”处理。
 - ID 字段可以留空，系统会在生成后统一分配稳定 ID。
 - requirements 字段原样反映已确认需求，不自行修改。
+- 请按输入中给出的 JSON Schema 输出。"""
+
+
+PLAN_MODIFICATION_SYSTEM_PROMPT = """你是专业旅游行程修改器。
+
+必须只返回合法 JSON 对象，不要返回 Markdown 或解释。
+
+修改原则：
+- 只做用户明确要求的最小必要修改，不改动未涉及的部分。
+- 修改可能联动预算/交通/住宿/时间，请一并更新受影响字段，保持整份行程自洽。
+- 不得改变 requirements（origin/destinations/duration_days/traveler_count/budget/must_visit/exclude），
+  requirements 字段必须与输入的当前行程一致。
+- 保留原有 day_id / activity_id / trans_id / acc_id；对新增项 ID 可留空，由系统重新分配。
+- schedule 的天数必须仍等于 requirements.duration_days。
+- 跨城市移动仍必须有 transportation。
+- 不得引入用户 exclude 的内容，不得删除 must_visit。
+- 预算/时间调整请合理估算，无可靠来源的价格视为估算并写进 assumptions。
 - 请按输入中给出的 JSON Schema 输出。"""

@@ -17,11 +17,38 @@ from planning.models import PlanDocument, PlanDraft, PlanningTask, TravelRequire
 _ACTIVE_STATES = ("collecting", "processing", "failed")
 
 
+class PlanNotFound(Exception):
+    """指定 plan 不存在或不属于当前 user_id。"""
+
+
+class PlanVersionConflict(Exception):
+    """乐观锁失败：调用方拿到的 expected_version 与数据库当前版本不一致。"""
+
+    def __init__(self, plan_id: str, current_version: int, expected_version: int) -> None:
+        self.plan_id = plan_id
+        self.current_version = current_version
+        self.expected_version = expected_version
+        super().__init__(
+            f"plan {plan_id} version conflict: expected {expected_version}, current {current_version}"
+        )
+
+
 class PlanningRepository(Protocol):
     def get_or_create_active_task(self, *, user_id: str, session_id: str) -> PlanningTask: ...
     def update_requirements(self, *, task_id: str, requirements: TravelRequirements, state: str = "collecting") -> PlanningTask: ...
     def mark_task_state(self, *, task_id: str, state: str, error_code: str | None = None, repair_count: int | None = None) -> PlanningTask: ...
     def create_plan_v1(self, *, task_id: str, user_id: str, session_id: str, draft: PlanDraft) -> PlanDocument: ...
+    def get_active_plan_for_session(self, *, user_id: str, session_id: str) -> PlanDocument | None: ...
+    def get_current_plan(self, *, plan_id: str, user_id: str) -> PlanDocument | None: ...
+    def modify_plan(
+        self,
+        *,
+        plan_id: str,
+        user_id: str,
+        expected_version: int,
+        new_draft: PlanDraft,
+        client_request_id: str,
+    ) -> PlanDocument: ...
 
 
 
@@ -85,6 +112,14 @@ class SQLitePlanningRepository:
                     plan_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (plan_id, version),
+                    FOREIGN KEY (plan_id) REFERENCES plans(plan_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS plan_modifications (
+                    client_request_id TEXT PRIMARY KEY,
+                    plan_id TEXT NOT NULL,
+                    resulting_version INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
                     FOREIGN KEY (plan_id) REFERENCES plans(plan_id)
                 );
                 """
@@ -277,6 +312,133 @@ class SQLitePlanningRepository:
     def get_plan_version(self, plan_id: str, version: int) -> PlanDocument | None:
         with self._connect() as conn:
             return self._get_plan_version_with_conn(conn, plan_id, version)
+
+    def get_current_plan(self, *, plan_id: str, user_id: str) -> PlanDocument | None:
+        """读取属于 user_id 的 plan 的当前活动版本。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT current_version FROM plans WHERE plan_id = ? AND user_id = ?",
+                (plan_id, user_id),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._get_plan_version_with_conn(conn, plan_id, row["current_version"])
+
+    def get_active_plan_for_session(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+    ) -> PlanDocument | None:
+        """按 (user_id, session_id) 取最近一次已交付的活动 plan。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT plan_id, current_version FROM plans
+                WHERE user_id = ? AND session_id = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (user_id, session_id),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._get_plan_version_with_conn(
+                conn,
+                row["plan_id"],
+                row["current_version"],
+            )
+
+    def modify_plan(
+        self,
+        *,
+        plan_id: str,
+        user_id: str,
+        expected_version: int,
+        new_draft: PlanDraft,
+        client_request_id: str,
+    ) -> PlanDocument:
+        """事务性写入新版本：乐观锁 + 幂等。
+
+        - 幂等：client_request_id 命中已有记录时直接回读对应版本，不重复写。
+        - 乐观锁：current_version != expected_version 时抛 PlanVersionConflict。
+        - 权限：plan 必须属于当前 user_id，否则抛 PlanNotFound。
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT plan_id, resulting_version FROM plan_modifications WHERE client_request_id = ?",
+                (client_request_id,),
+            ).fetchone()
+            if existing is not None:
+                if existing["plan_id"] != plan_id:
+                    conn.rollback()
+                    raise RuntimeError(
+                        f"client_request_id {client_request_id} 已用于其它 plan"
+                    )
+                document = self._get_plan_version_with_conn(
+                    conn,
+                    plan_id,
+                    existing["resulting_version"],
+                )
+                conn.commit()
+                if document is None:
+                    raise RuntimeError("plan_modifications 指向不存在的版本")
+                return document
+
+            plan_row = conn.execute(
+                "SELECT user_id, session_id, current_version FROM plans WHERE plan_id = ?",
+                (plan_id,),
+            ).fetchone()
+            if plan_row is None or plan_row["user_id"] != user_id:
+                conn.rollback()
+                raise PlanNotFound(f"plan {plan_id} 不存在或无权访问")
+
+            current_version = int(plan_row["current_version"])
+            if current_version != expected_version:
+                conn.rollback()
+                raise PlanVersionConflict(
+                    plan_id=plan_id,
+                    current_version=current_version,
+                    expected_version=expected_version,
+                )
+
+            new_version = current_version + 1
+            created_at = _now()
+            document = PlanDocument(
+                **new_draft.model_dump(),
+                plan_id=plan_id,
+                version=new_version,
+                parent_version=current_version,
+                user_id=user_id,
+                session_id=plan_row["session_id"],
+                created_at=created_at,
+            )
+            payload = document.model_dump_json()
+
+            conn.execute(
+                """
+                INSERT INTO plan_versions (plan_id, version, parent_version, plan_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (plan_id, new_version, current_version, payload, created_at.isoformat()),
+            )
+            conn.execute(
+                """
+                UPDATE plans SET current_version = ?, title = ?, updated_at = ?
+                WHERE plan_id = ?
+                """,
+                (new_version, document.title, created_at.isoformat(), plan_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO plan_modifications (client_request_id, plan_id, resulting_version, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (client_request_id, plan_id, new_version, created_at.isoformat()),
+            )
+            conn.commit()
+            return document
 
     def _get_plan_version_with_conn(
         self,
