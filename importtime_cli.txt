@@ -1,8 +1,0 @@
-﻿uv : Using CPython 3.14.6
-At line:1 char:371
-+ ... e-Command { uv run --no-sync python -X importtime -c "import cli" 2>& ...
-+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    + CategoryInfo          : NotSpecified: (Using CPython 3.14.6:String) [], RemoteException
-    + FullyQualifiedErrorId : NativeCommandError
- 
-error: failed to remove file `D:\code\travel-agent\backend_v4\.venv\lib64`: 拒绝访问。 (os error 5)
