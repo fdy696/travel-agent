@@ -1,4 +1,6 @@
 """路线 / 交通工具（高德地图 Web API）。文档：https://lbs.amap.com/api/webservice/guide/api"""
+import asyncio
+
 import httpx
 
 from config import require_key
@@ -35,8 +37,10 @@ async def get_route(
     key = require_key("AMAP_API_KEY")
 
     async with httpx.AsyncClient(timeout=10) as client:
-        start = await _geocode(origin, client)
-        end = await _geocode(destination, client)
+        start, end = await asyncio.gather(
+            _geocode(origin, client),
+            _geocode(destination, client),
+        )
         if not start or not end:
             return "未能解析起点或终点的经纬度。"
 

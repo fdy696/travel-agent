@@ -1,96 +1,130 @@
-"""v4 Week 1 CLI：通用问答交互入口（REPL / 单次问答）。
-
-用法（在 backend_v4 目录下）：
-  uv run python -m cli                            # 交互式 REPL
-  uv run python -m cli --message "北京天气怎么样"    # 单次问答（供冒烟测试）
-
-交互命令：
-  - 直接输入问题 → 得到回答
-  - 输入 /quit /exit /q 或 退出 → 结束
-
-实现基于 typer + rich（不手写 CLI）：参数解析交给 typer，输出交给 rich。
-编码兜底：把 stdout/stderr 重配置为 UTF-8 + errors="replace"，LLM 回复里偶发的
-非法字符（孤立代理项/emoji）会被安全替换为 "?"，而不是抛 UnicodeEncodeError 崩溃。
-"""
+"""CLI：Main Deep Agent + Travel Skill + Redis Checkpointer。"""
 from __future__ import annotations
 
 import asyncio
 import sys
+import uuid
 
 import typer
 from rich.console import Console
 from rich.prompt import Prompt
 
 from agent import build_agent
+from persistence import open_redis_checkpointer
+from planning.runtime import TravelRuntimeContext
 
-# Windows 控制台默认 GBK；统一重配置为 UTF-8，非法字符替换为 "?" 而非崩溃
+
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, ValueError):
-        pass  # 非 TTY / 已配置时跳过
+        pass
 
-app = typer.Typer(
-    name="travel-agent",
-    help="行伴旅游助手（v4 / Deep Agents / Week 1）",
-    no_args_is_help=False,
-)
+app = typer.Typer(name="travel-agent", help="行伴旅游助手", no_args_is_help=False)
 console = Console()
-
 QUIT_WORDS = ("/quit", "/exit", "/q", "退出")
 
-
-def _clean(text: str) -> str:
-    """剔除字符串里的孤立代理项，避免 utf-8 严格编码时抛 UnicodeEncodeError。
-
-    LLM 回复里偶发的 emoji 在管线里可能被解码成代理项；若某个代理项被截断成
-    孤立半段（如 \\udc80），任何 utf-8 严格编码都会报 "surrogates not allowed"。
-    这里先把整串按 utf-8（errors=replace）编码再解码回来，把坏字符替换成 "?"，
-    保证后续打印永不崩溃（rich 内部编码路径不一定继承 stdout 的 errors="replace"）。
-    """
-    if not isinstance(text, str):
-        return str(text)
-    return text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+_TOOL_STEPS = {
+    "get_weather": "查询天气",
+    "search_travel_info": "搜索旅游信息",
+    "search_maps": "查询路线",
+    "update_requirements": "整理出行需求",
+    "get_current_plan": "读取当前行程",
+    "create_plan": "保存新行程",
+    "update_plan": "保存修改后的行程",
+}
 
 
-def _error(msg: str) -> None:
-    """红色错误提示；动态内容走 markup=False，避免回复里的 [ ] 被误当标记。"""
-    console.print("[red][错误][/red]", end=" ")
-    console.print(msg, markup=False)
+def _config(session_id: str) -> dict:
+    return {"configurable": {"thread_id": session_id}}
 
 
-async def ask(agent, question: str) -> str:
-    """单轮问答。"""
-    result = await agent.ainvoke({"messages": [{"role": "user", "content": question}]})
-    return _clean(result["messages"][-1].content)
+def _context(session_id: str) -> TravelRuntimeContext:
+    return TravelRuntimeContext(user_id="cli-user", session_id=session_id)
+
+
+async def ask_stream(agent, question: str, *, session_id: str) -> str:
+    parts: list[str] = []
+    in_text = False
+    announced_task = False
+
+    def end_text() -> None:
+        nonlocal in_text
+        if in_text:
+            print()
+            in_text = False
+
+    async for event in agent.astream_events(
+        {"messages": [{"role": "user", "content": question}]},
+        config=_config(session_id),
+        context=_context(session_id),
+        version="v2",
+    ):
+        ev = event["event"]
+        node = event.get("metadata", {}).get("langgraph_node", "")
+        name = event.get("name", "")
+        meta = event.get("metadata", {})
+
+        # 只打印 Main Agent 最终正文；SubAgent model 输出保留在隔离 context。
+        if ev == "on_chat_model_stream" and node == "model":
+            if meta.get("langgraph_checkpoint_ns", "").startswith("tools:"):
+                continue
+            chunk = event.get("data", {}).get("chunk")
+            delta = getattr(chunk, "content", "") or ""
+            if delta:
+                if not in_text:
+                    print()
+                    in_text = True
+                print(delta, end="", flush=True)
+                parts.append(delta)
+            continue
+
+        if ev == "on_tool_start":
+            if name == "task":
+                if not announced_task:
+                    announced_task = True
+                    end_text()
+                    print("  · 深入检索中…", flush=True)
+                continue
+            if name in _TOOL_STEPS:
+                end_text()
+                print(f"  · {_TOOL_STEPS[name]}", flush=True)
+
+    end_text()
+    return "".join(parts)
+
+
+async def _run(*, message: str | None, session_id: str) -> None:
+    # Redis checkpointer 与 agent 的生命周期绑定；退出 CLI 时自动关闭连接。
+    async with open_redis_checkpointer() as checkpointer:
+        agent = build_agent(checkpointer=checkpointer)
+
+        if message:
+            await ask_stream(agent, message, session_id=session_id)
+            print()
+            return
+
+        await _repl(agent, session_id=session_id)
 
 
 @app.callback(invoke_without_command=True)
 def main(
-    message: str = typer.Option(None, "--message", "-m", help="单次问答，不进入交互模式"),
+    message: str = typer.Option(None, "--message", "-m", help="单次问答"),
+    session_id: str = typer.Option(None, "--session-id", help="会话 ID"),
 ) -> None:
-    """不带参数进入交互 REPL，带 --message 做单次问答。"""
+    session_id = session_id or f"cli-{uuid.uuid4().hex[:12]}"
     try:
-        agent = build_agent()
-    except Exception as e:
-        _error(f"初始化失败：{type(e).__name__}: {e}")
+        asyncio.run(_run(message=message, session_id=session_id))
+    except Exception as exc:
+        console.print(f"[red]运行失败：{type(exc).__name__}: {exc}[/red]")
         raise typer.Exit(1)
 
-    if message:
-        try:
-            reply = asyncio.run(ask(agent, message))
-        except Exception as e:
-            _error(f"{type(e).__name__}: {e}")
-            raise typer.Exit(1)
-        console.print(reply, markup=False)
-        return
 
-    asyncio.run(_repl(agent))
+async def _repl(agent, *, session_id: str) -> None:
+    console.print("[bold]行伴旅游助手[/bold]")
+    console.print(f"会话：{session_id}", markup=False)
+    console.print("支持旅游问答、完整行程创建与自然语言修改；输入 /quit 退出。\n")
 
-
-async def _repl(agent) -> None:
-    console.print("[bold]行伴旅游助手（v4 / Deep Agents / Week 1）[/bold]")
-    console.print("输入问题开始对话；输入 /quit 退出。\n")
     while True:
         try:
             user_input = Prompt.ask("你").strip()
@@ -104,14 +138,11 @@ async def _repl(agent) -> None:
             console.print("再见！")
             return
 
-        try:
-            reply = await ask(agent, user_input)
-        except Exception as e:
-            _error(f"{type(e).__name__}: {e}")
-            console.print()
-            continue
         console.print("[bold]助手：[/bold]")
-        console.print(reply, markup=False)
+        try:
+            await ask_stream(agent, user_input, session_id=session_id)
+        except Exception as exc:
+            console.print(f"[red]{type(exc).__name__}: {exc}[/red]")
         console.print()
 
 

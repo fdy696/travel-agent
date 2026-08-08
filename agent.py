@@ -1,121 +1,146 @@
-"""主 Agent 构建（v4 / Deep Agents / Week 1）。
+"""Main Deep Agent composition root.
 
-Week 1 目标（对应文档第 11 节）：最小 Deep Agent —— 主 Agent + get_weather / search 工具，
-通用问答跑通（CLI 模式）。暂不启用：Subagent（规划）、虚拟文件系统、permissions、memory、
-interrupt_on、中间件——这些属于 Week 2+。
-
-核心哲学（文档 1.2）：不重新造轮子，把业务逻辑聚焦在 Prompt 和 Tool 契约上。
-
-注意：docstring 就是给 LLM 看的"说明书"——写清楚适用场景与参数含义，
-直接决定模型选对工具的概率。
+最终架构：
+- Main Agent：唯一核心业务 Agent，负责普通问答、闲聊、旅游规划和 Plan 修改。
+- travel-planning Skill：按需加载旅游规划 procedure。
+- travel-researcher：只读 Research SubAgent，仅用于高输出量研究的 context isolation。
+- Domain Tools：Requirements / Current Plan 的确定性业务边界。
+- Redis Checkpointer：conversation/thread persistence，由应用生命周期注入。
 """
 from __future__ import annotations
 
-from deepagents import create_deep_agent
-from langchain_core.tools import tool
+from pathlib import Path
+
+from typing import TypedDict, Literal
+
+from deepagents import FilesystemPermission, create_deep_agent
+from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
+from deepagents.core.state import AgentState
 from langchain_deepseek import ChatDeepSeek
+from langgraph.types import Checkpointer
 
 from config import get_settings, require_key
-from tools.route import get_route as _get_route
-from tools.search import SearchDepth, SearchTopic, search_web as _search_web
-from tools.weather import get_weather as _get_weather
+from middleware import PlanCompletionMiddleware
+from planning.domain_tools import build_plan_domain_tools
+from planning.repository import SQLitePlanningRepository
+from planning.runtime import TravelRuntimeContext
+from subagents.research import build_travel_researcher
+from tools.agent_tools import TRAVEL_TOOLS
 
 
-# ── 业务工具（@tool 包装底层 API 实现）──────────────────────────────
+class TravelAgentState(AgentState):
+    """Custom state for the travel agent, including planning status."""
 
-@tool
-async def get_weather(city: str, forecast: bool = False) -> str:
-    """查询一个城市的当前天气；forecast=True 时同时返回未来 3 天预报。
-
-    用户问天气、气温、适不适合出行、穿什么衣服时使用。
-
-    Args:
-        city: 城市名，如 "北京"、"上海"、"丽江"
-        forecast: 是否返回未来 3 天预报（规划行程、决定带什么衣服时建议 True）
-    """
-    return await _get_weather(city, forecast)
+    plan_task_status: Literal["none", "pending", "committed"]
+    completion_retry: int
 
 
-@tool
-async def search_travel_info(
-    query: str,
-    max_results: int = 5,
-    topic: SearchTopic = "general",
-    search_depth: SearchDepth = "advanced",
-) -> str:
-    """联网搜索实时旅游信息。
-
-    需要景点推荐、攻略、美食、门票价格、住宿、当地新闻、出发前注意事项等
-    不在知识库里的实时信息时使用；要查当地最新动态、突发新闻时，用 topic="news"。
-    默认只在主流旅游站点（携程/马蜂窝/穷游/大众点评/小红书等）内搜索，质量更稳。
-
-    Args:
-        query: 搜索词，写具体一些效果更好，如"丽江 3天 旅游攻略"
-        max_results: 返回结果条数
-        topic: general（综合）/ news（新闻，查当地最新动态时用）
-        search_depth: basic（快）/ advanced（深，查详细攻略、价格对比时建议用）
-    """
-    return _search_web(query, max_results, topic, search_depth)
+BASE_DIR = Path(__file__).resolve().parent
+SKILLS_DIR = BASE_DIR / "skills"
 
 
-@tool
-async def search_maps(origin: str, destination: str, mode: str = "driving") -> str:
-    """查询两个地点之间的路线（驾车或公交），返回距离、耗时和逐向指引。
+TRAVEL_AGENT_SYSTEM_PROMPT = """你是“行伴”旅游助手，一位专业、贴心、务实的旅行伙伴。
 
-    用户问"怎么去、多远、多久、坐什么车"时使用。
+# 核心职责
+你负责两个核心能力：
+1. 普通问答 / 闲聊。
+2. 完整旅游规划，包括创建、修改、延长、缩短、重排和重新规划。
 
-    Args:
-        origin: 起点地址，如 "北京西站"
-        destination: 终点地址，如 "北京首都国际机场"
-        mode: driving（驾车）/ transit（公交）
-    """
-    return await _get_route(origin, destination, mode)
+你是用户整个 conversation 的主要 reasoning owner，不要把旅游规划本身委派给其他业务 Agent。
+
+# 普通问答
+- 闲聊、稳定旅游常识可以直接回答。
+- 天气、交通、价格、营业时间、攻略等实时/可变信息必须调用对应工具后回答。
+- 当前/近 3 天天气使用 get_weather；更远日期的季节气候使用联网搜索。
+- 路线、距离、耗时使用 search_maps。
+
+# Travel Planning Skill
+当用户需要创建、修改、延长、缩短、重排或重新规划旅行时，先读取并遵循 travel-planning Skill。
+Skill 是规划 procedure；Requirements / Current Plan 的真实状态只能通过 Domain Tools 读取或修改。
+
+# Research delegation
+简单 Research 直接使用自己的 search/weather/maps tools。
+当任务需要大量、多源 Research，预计会产生很多一次性 Search / Weather / Map 中间结果，
+而主 conversation 最终只需要研究结论时，可以通过 task 自动委派给 subagent_type="travel-researcher"。
+是否委派由你根据任务判断，不使用天数、搜索次数、关键词等硬编码阈值。
+travel-researcher 只做只读 Research；最终 Plan 仍由你结合用户 conversation、Requirements 和 Research Brief 完成。
+
+# Conversation Context
+用户对刚生成/刚修改的行程做简单追问，例如“第二天住哪”“为什么这样安排”，
+只要当前 conversation context 足够，直接回答。
+只有 context 不足、被压缩，或者用户明确要求读取系统最终保存状态时，才调用 get_current_plan。
+
+# Domain Boundary
+- update_requirements：外部化当前规划需求，并由代码判断 blocking fields 是否完整。
+- get_current_plan：读取 canonical current Plan。
+- create_plan / update_plan：Plan 唯一正式提交入口。
+- 不允许仅凭聊天记忆声称数据库 Plan 已更新。
+- 不编造 user_id、session_id、plan_id 等系统字段。
+- Domain Tool 返回失败时，不得声称保存成功。
+
+# Output
+create_plan / update_plan 成功后，返回值中的 <final_markdown>...</final_markdown> 已经是确定性 Renderer 的最终用户内容。
+原样完整输出其中 Markdown，不再次总结、压缩或重写。
+
+# 边界
+- 不向用户暴露内部工具名、subagent 名、user_id、session_id、plan_id 等技术细节。
+- 不编造实时事实。
+"""
 
 
-TRAVEL_TOOLS = [
-    get_weather,
-    search_travel_info,
-    search_maps,
-]
-
-
-# ── 主 Agent System Prompt（文档第 7 节骨架，裁剪到 Week 1 的通用问答范围）──
-
-TRAVEL_AGENT_SYSTEM_PROMPT = """你是"行伴"旅游助手，一位专业、贴心的旅行规划伙伴。
-
-# 你的能力
-- 普通对话：闲聊、旅游建议、常识问答，直接回答即可。
-- 查天气：调用 get_weather。用户问天气、气温、适不适合出行时使用。
-  若涉及未来几天出行，传 forecast=True 获取预报。
-- 查攻略/景点/美食/价格：调用 search_travel_info。需要实时信息时，先联网再回答。
-- 查路线/交通：调用 search_maps。用户问"怎么去、多远、多久、坐什么车"时使用。
-
-# 工具使用规则
-- 涉及实时、可变的信息（天气、交通、价格、攻略、营业时间），必须先调工具，不要凭记忆编造。
-- 一次只问清必要的信息。比如用户没说目的地，先问，再查。
-- 简单常识问题直接回答，不必调工具。
-
-# 回复风格
-- 简洁、直接、口语化，像朋友聊天，不要罗列晦涩术语。
-- 天气、交通信息可能有时效性，回答末尾可提醒用户出发前再确认。
-- 不要暴露内部工具名或技术细节。"""
-
-
-def build_agent():
-    """构建主 Deep Agent（进程内懒加载，供 CLI / 后续 API 复用）。
-
-    模型用与现有 backend 一致的 DeepSeek（v4 文档示例为 claude-sonnet-4，
-    如需切换改 CHAT_MODEL + 对应 key 即可）。
-    """
-    llm = ChatDeepSeek(
+def _build_llm() -> ChatDeepSeek:
+    return ChatDeepSeek(
         model=get_settings().CHAT_MODEL,
         api_key=require_key("DEEPSEEK_API_KEY"),
         temperature=0.3,
-        max_retries=3,  # 指数退避重试
+        max_tokens=32000,
+        max_retries=3,
+        extra_body={"thinking": {"type": "disabled"}},
     )
+
+
+def _build_backend() -> CompositeBackend:
+    # Agent scratch files 保持 thread-scoped；Skill 从项目目录只读加载。
+    return CompositeBackend(
+        default=StateBackend(),
+        routes={
+            "/skills/": FilesystemBackend(
+                root_dir=SKILLS_DIR,
+                virtual_mode=True,
+            ),
+        },
+    )
+
+
+def build_agent(*, checkpointer: Checkpointer):
+    """构造 Main Deep Agent。checkpointer 由应用生命周期注入。"""
+    llm = _build_llm()
+    repository = SQLitePlanningRepository()
+    domain_tools = build_plan_domain_tools(repository)
+
     return create_deep_agent(
+        state_schema=TravelAgentState,
         model=llm,
         system_prompt=TRAVEL_AGENT_SYSTEM_PROMPT,
-        tools=TRAVEL_TOOLS,
+        tools=[
+            *TRAVEL_TOOLS,
+            domain_tools.update_requirements,
+            domain_tools.get_current_plan,
+            domain_tools.create_plan,
+            domain_tools.update_plan,
+        ],
+        skills=["/skills/"],
+        middleware=[PlanCompletionMiddleware()],
+        subagents=[build_travel_researcher()],
+        backend=_build_backend(),
+        permissions=[
+            FilesystemPermission(
+                operations=["write"],
+                paths=["/skills/**"],
+                mode="deny",
+            ),
+        ],
+        checkpointer=checkpointer,
+        context_schema=TravelRuntimeContext,
         name="travel_agent",
     )

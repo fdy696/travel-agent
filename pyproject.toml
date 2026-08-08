@@ -1,18 +1,20 @@
 [project]
-name = "travel-agent-v4"
-version = "0.1.0"
-description = "智能旅游助手 v4（Deep Agents 框架版）— Week 1：最小 Deep Agent 通用问答（CLI）"
+name = "travel-agent"
+version = "0.5.0"
+description = "C-end conversational travel assistant built with Deep Agents"
 requires-python = ">=3.11"
 dependencies = [
-    "pydantic-settings>=2.0",
-    "tavily>=0.5",
-    "httpx>=0.27",
-    "langchain>=1.0",
-    "langchain-deepseek>=1.0",
-    "langgraph>=1.0",
-    "deepagents>=0.7.4",
-    "typer>=0.12",
-    "rich>=13.7",
+    "deepagents==0.6.12",
+    "langchain==1.3.14",
+    "langchain-deepseek==1.1.0",
+    "langgraph==1.2.9",
+    "langgraph-checkpoint-redis==0.5.1",
+    "tavily-python==0.7.26",
+    "httpx>=0.27,<1",
+    "pydantic>=2.11,<3",
+    "pydantic-settings>=2.10,<3",
+    "typer>=0.12,<1",
+    "rich>=13.7,<15",
 ]
 
 [build-system]
@@ -20,4 +22,20 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["__init__.py", "agent.py", "cli.py", "config.py", "tools"]
+only-include = [
+    "__init__.py",
+    "agent.py",
+    "cli.py",
+    "config.py",
+    "persistence.py",
+    "tools",
+    "planning",
+    "subagents",
+    "skills",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9,<10",
+    "pytest-asyncio>=1.4,<2",
+]
