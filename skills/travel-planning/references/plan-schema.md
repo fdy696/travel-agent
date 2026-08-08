@@ -1,13 +1,12 @@
 # Rich Plan schema reference
 
-`create_plan` and `update_plan` accept a `plan` object that must validate as `PlanDraft`.
+`create_plan` and `update_plan` accept a content object that must validate as `PlanContent`.
 Optional fields may be omitted or empty. Never fabricate data merely to fill fields.
 
 ```text
-PlanDraft
+PlanContent
 ├── title: string (required)
 ├── subtitle?: string
-├── requirements: TravelRequirements
 ├── overview?: string
 ├── weather_summary?: string
 ├── weather_details[]
@@ -61,24 +60,10 @@ PlanDraft
 └── assumptions[]
 ```
 
-## TravelRequirements
+## Code-owned fields
 
-```text
-origin?: string
-destinations: string[]
-start_date?: YYYY-MM-DD
-end_date?: YYYY-MM-DD
-duration_days?: integer 1..60
-traveler_count?: integer 1..50
-budget_per_person_cny?: integer
-pace?: relaxed | moderate | intense | comfortable
-must_visit: string[]
-exclude: string[]
-accommodation_preference?: string
-notes?: string
-```
-
-The Domain Tool overwrites `plan.requirements` with canonical requirements and assigns stable IDs/dates where applicable, so do not invent ID values.
+Do **not** generate or submit `requirements`, `plan_id`, `user_id`, `session_id`, `created_at`, or `updated_at`.
+The Domain layer reads canonical requirements from SQLite, combines them with `PlanContent`, assigns stable IDs/dates, validates the complete `PlanDraft`, and persists it.
 
 ## Quality target
 

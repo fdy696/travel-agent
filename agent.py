@@ -11,28 +11,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from typing import TypedDict, Literal
-
 from deepagents import FilesystemPermission, create_deep_agent
 from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
-from deepagents.core.state import AgentState
 from langchain_deepseek import ChatDeepSeek
 from langgraph.types import Checkpointer
 
 from config import get_settings, require_key
-from middleware import PlanCompletionMiddleware
+from middleware import PlanCompletionMiddleware, RuntimeContextMiddleware
 from planning.domain_tools import build_plan_domain_tools
 from planning.repository import SQLitePlanningRepository
 from planning.runtime import TravelRuntimeContext
 from subagents.research import build_travel_researcher
 from tools.agent_tools import TRAVEL_TOOLS
-
-
-class TravelAgentState(AgentState):
-    """Custom state for the travel agent, including planning status."""
-
-    plan_task_status: Literal["none", "pending", "committed"]
-    completion_retry: int
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -71,7 +61,7 @@ travel-researcher 只做只读 Research；最终 Plan 仍由你结合用户 conv
 只有 context 不足、被压缩，或者用户明确要求读取系统最终保存状态时，才调用 get_current_plan。
 
 # Domain Boundary
-- update_requirements：外部化当前规划需求，并由代码判断 blocking fields 是否完整。
+- update_requirements：外部化新建/替换 Plan 的需求，并由代码判断 blocking fields 是否完整。
 - get_current_plan：读取 canonical current Plan。
 - create_plan / update_plan：Plan 唯一正式提交入口。
 - 不允许仅凭聊天记忆声称数据库 Plan 已更新。
@@ -119,7 +109,6 @@ def build_agent(*, checkpointer: Checkpointer):
     domain_tools = build_plan_domain_tools(repository)
 
     return create_deep_agent(
-        state_schema=TravelAgentState,
         model=llm,
         system_prompt=TRAVEL_AGENT_SYSTEM_PROMPT,
         tools=[
@@ -130,7 +119,7 @@ def build_agent(*, checkpointer: Checkpointer):
             domain_tools.update_plan,
         ],
         skills=["/skills/"],
-        middleware=[PlanCompletionMiddleware()],
+        middleware=[RuntimeContextMiddleware(), PlanCompletionMiddleware()],
         subagents=[build_travel_researcher()],
         backend=_build_backend(),
         permissions=[

@@ -8,6 +8,7 @@
 - **Domain Tools + SQLite**：Requirements 与 Current Plan 的 canonical business state。
 - **Redis Checkpointer**：持久化 LangGraph conversation/thread state。
 - **Deterministic Renderer**：Plan JSON -> 完整 Markdown，避免 Main Agent 二次压缩。
+- **Plan Completion Middleware**：Plan mutation 一旦进入 pending，未 commit 不允许 Main Agent 正常结束。
 
 ## 架构
 
@@ -19,6 +20,7 @@ Main Deep Agent
   |-- Chat / QA
   |-- Travel Planning Skill
   |-- search / weather / maps
+  |-- Plan Completion Middleware
   |-- Plan Domain Tools
   |     |-- update_requirements
   |     |-- get_current_plan
@@ -44,6 +46,7 @@ Requirements / Current Plan -> SQLite
 ├── cli.py
 ├── config.py
 ├── persistence.py
+├── middleware.py
 ├── docker-compose.yml
 ├── .env.example
 │
@@ -53,7 +56,8 @@ Requirements / Current Plan -> SQLite
 │   ├── domain_tools.py
 │   ├── repository.py
 │   ├── renderer.py
-│   └── runtime.py
+│   ├── runtime.py
+│   └── state.py
 │
 ├── subagents/
 │   └── research.py
@@ -98,6 +102,7 @@ cp .env.example .env
 ```env
 DEEPSEEK_API_KEY=...
 CHAT_MODEL=deepseek-v4-flash
+TRAVEL_TIMEZONE=Asia/Shanghai
 
 TAVILY_API_KEY=...
 
@@ -220,7 +225,7 @@ TRAVEL_PLANNING_DB=/your/path/travel_agent.db
 
 ```text
 用户：2个人
-预期：requirements complete -> Research（按需要）-> create_plan。
+预期：requirements complete -> pending -> Research（按需要）-> create_plan -> committed；Research 后若模型试图直接结束，Middleware 会拉回 model。
 ```
 
 ### Plan 追问
@@ -234,7 +239,7 @@ TRAVEL_PLANNING_DB=/your/path/travel_agent.db
 
 ```text
 用户：第一天轻松一点
-预期：Main Agent 使用 travel-planning Skill -> semantic edit -> update_plan。
+预期：Main Agent 使用 travel-planning Skill -> begin_plan_change -> semantic edit -> update_plan -> committed。
 ```
 
 ### 同一旅行重规划

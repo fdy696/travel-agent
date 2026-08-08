@@ -4,10 +4,45 @@ from __future__ import annotations
 from datetime import date as Date, datetime, timedelta
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 Pace = Literal["relaxed", "moderate", "intense", "comfortable"]
+
+# 中文/口语节奏词 → 英文枚举。校验时归一化，避免模型提交中文节奏被拒。
+_PACE_ALIASES = {
+    "relaxed": "relaxed",
+    "轻松": "relaxed",
+    "悠闲": "relaxed",
+    "舒适": "comfortable",
+    "休闲": "relaxed",
+    "慢节奏": "relaxed",
+    "moderate": "moderate",
+    "适中": "moderate",
+    "均衡": "moderate",
+    "中等": "moderate",
+    "常规": "moderate",
+    "intense": "intense",
+    "紧凑": "intense",
+    "充实": "intense",
+    "紧张": "intense",
+    "高强度": "intense",
+    "暴走": "intense",
+    "comfortable": "comfortable",
+}
+
+
+def _normalize_pace(value: str) -> str:
+    """把中文/口语节奏词归一化为英文枚举；无法识别时原样返回交给 pydantic 报错。"""
+    key = value.strip().lower()
+    return _PACE_ALIASES.get(key, value)
+
+
+def _pace_validator_before(value: object) -> object:
+    """before 模式：在字面量校验前把中文归一化为英文，再交给 literal 检查。"""
+    if isinstance(value, str):
+        return _normalize_pace(value)
+    return value
 
 
 class TravelRequirements(BaseModel):
@@ -25,6 +60,8 @@ class TravelRequirements(BaseModel):
     exclude: list[str] = Field(default_factory=list)
     accommodation_preference: str | None = Field(default=None, description="住宿倾向，如「靠近老门东/夫子庙，方便逛吃夜景」")
     notes: str | None = None
+
+    _normalize_pace = field_validator("pace", mode="before")(_pace_validator_before)
 
     @model_validator(mode="after")
     def validate_dates(self) -> "TravelRequirements":
@@ -51,6 +88,8 @@ class RequirementsPatch(BaseModel):
     exclude: list[str] | None = None
     accommodation_preference: str | None = None
     notes: str | None = None
+
+    _normalize_pace = field_validator("pace", mode="before")(_pace_validator_before)
 
 
 class Poi(BaseModel):
@@ -215,10 +254,8 @@ class PlanContent(BaseModel):
 
 
 class PlanDraft(PlanContent):
-    """LLM 生成、尚未持久化的计划。
+    """由代码将 LLM PlanContent 与 canonical TravelRequirements 组合后的领域 Plan。"""
 
-    由代码将 LLM 生成的 PlanContent 与确定的 TravelRequirements 组合而成。
-    """
     requirements: TravelRequirements
 
 

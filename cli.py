@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.prompt import Prompt
 
 from agent import build_agent
+from config import get_settings
 from persistence import open_redis_checkpointer
 from planning.runtime import TravelRuntimeContext
 
@@ -32,15 +33,25 @@ _TOOL_STEPS = {
     "get_current_plan": "读取当前行程",
     "create_plan": "保存新行程",
     "update_plan": "保存修改后的行程",
+    "begin_plan_change": "准备修改行程",
 }
 
 
 def _config(session_id: str) -> dict:
-    return {"configurable": {"thread_id": session_id}}
+    # recursion_limit 是正常复杂 agent run 的全局容量，不承担业务循环保护。
+    # PlanCompletionMiddleware 自己有更小的 pending budget 来终止跑偏。
+    return {
+        "configurable": {"thread_id": session_id},
+        "recursion_limit": 60,
+    }
 
 
 def _context(session_id: str) -> TravelRuntimeContext:
-    return TravelRuntimeContext(user_id="cli-user", session_id=session_id)
+    return TravelRuntimeContext(
+        user_id="cli-user",
+        session_id=session_id,
+        timezone=get_settings().TRAVEL_TIMEZONE,
+    )
 
 
 async def ask_stream(agent, question: str, *, session_id: str) -> str:

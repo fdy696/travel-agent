@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     # ---- Model ----
     DEEPSEEK_API_KEY: str = ""
     CHAT_MODEL: str = "deepseek-v4-flash"
+    TRAVEL_TIMEZONE: str = "Asia/Shanghai"
 
     # ---- Search (Tavily) ----
     TAVILY_API_KEY: str = ""

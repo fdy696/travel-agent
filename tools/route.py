@@ -7,19 +7,50 @@ from config import require_key
 
 AMAP_HOST = "https://restapi.amap.com"
 
+# 高德 Web 服务 key 默认 QPS=3；并发打接口会收到 CUQPS_HAS_EXCEEDED_THE_LIMIT
+# 并静默失败，因此所有请求串行发出并带上最小间隔。
+GEOCODE_DELAY = 0.4
 
-async def _geocode(address: str, client: httpx.AsyncClient) -> dict | None:
-    """地址 → 经纬度 + 城市。返回 {"location": "lng,lat", "city": "..."}"""
+
+async def _geocode_candidates(
+    address: str,
+    client: httpx.AsyncClient,
+) -> list[dict]:
+    """地址 → 全部地理编码候选。每个候选 {"location": "lng,lat", "city": "..."}。
+
+    泛称（如“颐和园”“故宫”）高德会返回全国同名地点，默认取第一个可能命中
+    错误城市（如颐和园 → 山东枣庄）。返回全部候选，由调用方根据两端城市
+    交集选择真实城市，避免被单个错误候选带偏。
+
+    status != 1 时返回 []（QPS 超限、无候选等）。
+    """
     key = require_key("AMAP_API_KEY")
     resp = await client.get(
         f"{AMAP_HOST}/v3/geocode/geo",
         params={"address": address, "key": key},
     )
     data = resp.json()
-    if data.get("status") == "1" and data.get("geocodes"):
-        g = data["geocodes"][0]
-        return {"location": g["location"], "city": g.get("city") or ""}
-    return None
+    if data.get("status") != "1" or not data.get("geocodes"):
+        return []
+
+    return [
+        {
+            "location": g["location"],
+            "city": (g.get("city") or "").replace("市", ""),
+        }
+        for g in data["geocodes"]
+    ]
+
+
+def _pick_candidate(candidates: list[dict], prefer_city: str = "") -> dict | None:
+    """从候选里选出城市与 prefer_city 一致的第一个；无提示或都不匹配时取第一个。"""
+    if not candidates:
+        return None
+    if prefer_city:
+        for c in candidates:
+            if c["city"] and (c["city"] in prefer_city or prefer_city in c["city"]):
+                return c
+    return candidates[0]
 
 
 async def get_route(
@@ -37,12 +68,22 @@ async def get_route(
     key = require_key("AMAP_API_KEY")
 
     async with httpx.AsyncClient(timeout=10) as client:
-        start, end = await asyncio.gather(
-            _geocode(origin, client),
-            _geocode(destination, client),
-        )
-        if not start or not end:
+        # 串行 geocode 以规避高德 QPS 限制（并发会收到 CUQPS_HAS_EXCEEDED_THE_LIMIT）。
+        start_candidates = await _geocode_candidates(origin, client)
+        await asyncio.sleep(GEOCODE_DELAY)
+        end_candidates = await _geocode_candidates(destination, client)
+        if not start_candidates or not end_candidates:
             return "未能解析起点或终点的经纬度。"
+
+        # 两端泛称可能各自命中不同城市的同名地点（颐和园→枣庄、故宫→北京）。
+        # 路线两端几乎总在同一城市：取候选城市的交集，若无交集则退回各自第一个。
+        start_cities = {c["city"] for c in start_candidates if c["city"]}
+        end_cities = {c["city"] for c in end_candidates if c["city"]}
+        common = start_cities & end_cities
+        prefer = next(iter(common)) if common else ""
+
+        start = _pick_candidate(start_candidates, prefer)
+        end = _pick_candidate(end_candidates, prefer)
 
         if mode == "transit":
             resp = await client.get(
@@ -50,7 +91,7 @@ async def get_route(
                 params={
                     "origin": start["location"],
                     "destination": end["location"],
-                    "city": start["city"] or "北京",  # 公交接口要求出发城市
+                    "city": (start["city"] or "北京") + "市",  # 公交接口要求“北京市”格式
                     "key": key,
                 },
             )

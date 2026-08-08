@@ -51,3 +51,18 @@ SQLite
 - `planning/repository.py`: persistence only.
 - `planning/models.py`: Pydantic schemas + deterministic normalization.
 - `planning/renderer.py`: structured Plan -> Markdown.
+
+## Plan completion invariant
+
+Plan CRUD remains in code, while the model owns semantic planning. The only extra control state is thread-scoped:
+
+```text
+plan_task_status = none | pending | committed
+```
+
+- `update_requirements` moves a complete new-plan request to `pending`.
+- `begin_plan_change` marks a semantic modification as `pending` without touching SQLite.
+- `create_plan` / `update_plan` move the task to `committed` only after persistence succeeds.
+- `PlanCompletionMiddleware.after_model` rejects a normal model stop while the task is still `pending`. It jumps back to the model instead of forcing a fixed planning workflow.
+
+Tool state changes use LangGraph `Command(update=...)`; returning a JSON field named `state` is not a state update.

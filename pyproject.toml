@@ -1,6 +1,6 @@
 [project]
 name = "travel-agent"
-version = "0.5.0"
+version = "0.5.1"
 description = "C-end conversational travel assistant built with Deep Agents"
 requires-python = ">=3.11"
 dependencies = [
@@ -27,6 +27,7 @@ only-include = [
     "agent.py",
     "cli.py",
     "config.py",
+    "middleware.py",
     "persistence.py",
     "tools",
     "planning",

@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from planning.models import (
+    PlanContent,
     PlanDocument,
     PlanDraft,
     RequirementsPatch,
@@ -85,7 +86,7 @@ class PlanDomainService:
         *,
         user_id: str,
         session_id: str,
-        draft: PlanDraft,
+        content: PlanContent,
     ) -> PlanDocument:
         requirements = self.repository.get_requirements_draft(
             user_id=user_id,
@@ -98,6 +99,7 @@ class PlanDomainService:
         if missing:
             raise RequirementsIncomplete(missing)
 
+        draft = PlanDraft(requirements=requirements, **content.model_dump())
         normalized = normalize_plan_draft(draft, requirements)
         document = self.repository.create_plan(
             user_id=user_id,
@@ -115,7 +117,7 @@ class PlanDomainService:
         *,
         user_id: str,
         session_id: str,
-        draft: PlanDraft,
+        content: PlanContent,
         requirements_patch: RequirementsPatch | None = None,
         use_requirements_draft: bool = False,
     ) -> PlanDocument:
@@ -152,6 +154,7 @@ class PlanDomainService:
         if missing:
             raise RequirementsIncomplete(missing)
 
+        draft = PlanDraft(requirements=canonical_requirements, **content.model_dump())
         normalized = normalize_plan_draft(draft, canonical_requirements)
         document = self.repository.update_current_plan(
             user_id=user_id,
