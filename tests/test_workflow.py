@@ -1,7 +1,8 @@
 import os
 
 import pytest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
 from agent import _build_llm
 from planning.intelligence import LLMPlanningIntelligence
@@ -10,7 +11,6 @@ from planning.models import (
     DayPlan,
     PlanDraft,
     RequirementsPatch,
-    ResearchResult,
     TravelRequirements,
 )
 from planning.repository import SQLitePlanningRepository
@@ -27,7 +27,7 @@ class FakeIntelligence:
         return RequirementsPatch()
 
     async def research(self, requirements):
-        return ResearchResult(attractions=["昆明翠湖", "大理古城"], source_notes=["fixture"])
+        return "# 研究报告\n\n- 景点：昆明翠湖、大理古城\n"
 
     async def generate_plan(self, *, requirements, research):
         return PlanDraft(
@@ -39,36 +39,37 @@ class FakeIntelligence:
                     city="昆明",
                     activities=[Activity(start_time="09:00", end_time="11:00", title="翠湖", location="翠湖")],
                     transportation=[],
-                    estimated_daily_cost_cny_per_person=300,
                 ),
                 DayPlan(
                     day=2,
                     city="大理",
                     activities=[Activity(start_time="10:00", end_time="12:00", title="大理古城", location="大理古城")],
                     transportation=[],
-                    estimated_daily_cost_cny_per_person=400,
                 ),
             ],
         )
 
-    async def repair_plan(self, *, requirements, research, draft, issues):
-        # 补上跨城市交通。
-        from planning.models import Transportation
-        draft.schedule[1].transportation = [
-            Transportation(
-                from_location="昆明",
-                to_location="大理",
-                mode="高铁",
-                estimated_duration_minutes=120,
-            )
-        ]
-        return draft
+    async def generate_modification(self, *, current, instruction, research):
+        modified = current.model_copy(update={"title": f"[已修改]{current.title}"})
+        return modified
+
+
+def _seed_plan(repo, *, user_id="u1", session_id="s1"):
+    req = TravelRequirements(destinations=["大理"], duration_days=1, traveler_count=2)
+    return repo.create_plan(
+        user_id=user_id,
+        session_id=session_id,
+        draft=PlanDraft(
+            title="大理1日游",
+            requirements=req,
+            schedule=[DayPlan(day=1, day_id="d1", city="大理")],
+        ),
+    ), req
 
 
 @pytest.mark.asyncio
 @pytest.mark.real_api
 async def test_real_deepseek_planning_intelligence():
-    """可选的真实 DeepSeek 冒烟测试；需要显式 REAL_DEEPSEEK=1。"""
     if os.getenv("REAL_DEEPSEEK") != "1":
         pytest.skip("设置 REAL_DEEPSEEK=1 才调用真实 DeepSeek API")
 
@@ -90,20 +91,18 @@ async def test_real_deepseek_planning_intelligence():
     assert patch.destinations or patch.duration_days or patch.traveler_count
 
     research = await intelligence.research(requirements)
-    assert research.has_useful_data()
+    assert research.strip()
 
-    draft = await intelligence.generate_plan(
-        requirements=requirements,
-        research=research,
-    )
+    draft = await intelligence.generate_plan(requirements=requirements, research=research)
     assert len(draft.schedule) == requirements.duration_days
     assert draft.requirements.destinations == requirements.destinations
 
 
 @pytest.mark.asyncio
-async def test_workflow_collect_then_complete(tmp_path):
+async def test_workflow_create_collect_then_complete(tmp_path):
+    """create 路径：首轮信息不足 → 追问 → 补充 → 生成计划。"""
     repo = SQLitePlanningRepository(tmp_path / "travel.db")
-    graph = build_planning_graph(intelligence=FakeIntelligence(), repository=repo)
+    graph = build_planning_graph(intelligence=FakeIntelligence(), repository=repo, checkpointer=InMemorySaver())
     config = {"configurable": {"thread_id": "s1"}}
     context = TravelRuntimeContext(user_id="u1", session_id="s1")
 
@@ -119,10 +118,75 @@ async def test_workflow_collect_then_complete(tmp_path):
         config=config,
         context=context,
     )
-    assert "行程已生成" in second["messages"][-1].content
+    content = second["messages"][-1].content
+    assert "# 云南2日游" in content
+    assert "## Day 1:" in content
+    assert "## 📋 出行基础信息" in content
 
-    tasks = []
-    # Repository 已完成同 session 的任务；再次 get_or_create 会创建新任务，所以直接检查 DB 中已交付计划。
-    with repo._connect() as conn:  # 测试层允许读内部连接验证持久化
+    with repo._connect() as conn:
         row = conn.execute("SELECT COUNT(*) AS n FROM plans").fetchone()
         assert row["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_workflow_no_plan_routes_to_create(tmp_path):
+    """session 没有计划时 detect_intent → create 链路。"""
+    repo = SQLitePlanningRepository(tmp_path / "travel.db")
+    graph = build_planning_graph(intelligence=FakeIntelligence(), repository=repo, checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "s2"}}
+    context = TravelRuntimeContext(user_id="u2", session_id="s2")
+
+    result = await graph.ainvoke(
+        {"messages": [HumanMessage("帮我规划云南2日游")]},
+        config=config,
+        context=context,
+    )
+    assert "几个人" in result["messages"][-1].content
+    assert repo.get_active_plan_for_session(user_id="u2", session_id="s2") is None
+
+
+@pytest.mark.asyncio
+async def test_workflow_detect_intent_routes_to_modify(tmp_path):
+    """已有计划时 detect_intent → modify 路径，最终由 Workflow 直接写入 repository。"""
+    repo = SQLitePlanningRepository(tmp_path / "travel.db")
+    _seed_plan(repo, user_id="u1", session_id="s1")
+
+    graph = build_planning_graph(intelligence=FakeIntelligence(), repository=repo, checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "s1-modify"}}
+    context = TravelRuntimeContext(user_id="u1", session_id="s1")
+
+    result = await graph.ainvoke(
+        {"messages": [HumanMessage("第一天不要安排景点，直接休息")]},
+        config=config,
+        context=context,
+    )
+
+    active = repo.get_active_plan_for_session(user_id="u1", session_id="s1")
+    assert active is not None
+    assert active.title == "[已修改]大理1日游", "修改结果应由 Workflow 直接写入 repository"
+    assert "修改" in result["messages"][-1].content
+
+
+@pytest.mark.asyncio
+async def test_workflow_modify_skips_research_for_simple_instruction(tmp_path):
+    """简单修改（无研究触发词）应跳过 research，直接进入 generate。"""
+    research_called = []
+
+    class TrackingIntelligence(FakeIntelligence):
+        async def research(self, requirements):
+            research_called.append(True)
+            return await super().research(requirements)
+
+    repo = SQLitePlanningRepository(tmp_path / "travel.db")
+    _seed_plan(repo, user_id="u1", session_id="s1")
+
+    graph = build_planning_graph(intelligence=TrackingIntelligence(), repository=repo, checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "s3"}}
+    context = TravelRuntimeContext(user_id="u1", session_id="s1")
+
+    await graph.ainvoke(
+        {"messages": [HumanMessage("第一天不要安排景点")]},
+        config=config,
+        context=context,
+    )
+    assert not research_called, "简单修改不应触发 research"

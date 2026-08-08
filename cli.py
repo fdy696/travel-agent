@@ -63,8 +63,6 @@ _PLANNING_STEPS = {
     "respond_need_more": "向你补充提问",
     "research": "调研目的地信息",
     "generate": "生成行程草案",
-    "validate": "校验行程",
-    "repair": "修复行程问题",
     "persist": "保存行程",
     "finish": "整理行程输出",
     "fail": "规划未能完成",

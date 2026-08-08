@@ -7,9 +7,8 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 
-Pace = Literal["relaxed", "moderate", "intense"]
+Pace = Literal["relaxed", "moderate", "intense", "comfortable"]
 TaskState = Literal["collecting", "processing", "completed", "failed", "cancelled"]
-Severity = Literal["low", "medium", "high"]
 
 
 class TravelRequirements(BaseModel):
@@ -25,6 +24,7 @@ class TravelRequirements(BaseModel):
     pace: Pace | None = None
     must_visit: list[str] = Field(default_factory=list)
     exclude: list[str] = Field(default_factory=list)
+    accommodation_preference: str | None = Field(default=None, description="住宿倾向，如「靠近老门东/夫子庙，方便逛吃夜景」")
     notes: str | None = None
 
     @model_validator(mode="after")
@@ -50,42 +50,40 @@ class RequirementsPatch(BaseModel):
     pace: Pace | None = None
     must_visit: list[str] | None = None
     exclude: list[str] | None = None
+    accommodation_preference: str | None = None
     notes: str | None = None
 
 
-class ResearchResult(BaseModel):
-    """Research Node 的结构化产物。"""
+class Poi(BaseModel):
+    """行程中的地点卡片：名称 + 地址。"""
 
-    weather: list[str] = Field(default_factory=list)
-    attractions: list[str] = Field(default_factory=list)
-    transport: list[str] = Field(default_factory=list)
-    accommodation: list[str] = Field(default_factory=list)
-    food: list[str] = Field(default_factory=list)
-    source_notes: list[str] = Field(default_factory=list)
-    assumptions: list[str] = Field(default_factory=list)
-    partial_failures: list[str] = Field(default_factory=list)
-
-    def has_useful_data(self) -> bool:
-        return any(
-            (
-                self.weather,
-                self.attractions,
-                self.transport,
-                self.accommodation,
-                self.food,
-                self.source_notes,
-            )
-        )
+    name: str
+    address: str | None = None
 
 
 class Activity(BaseModel):
+    """一段具体的游览/体验活动。
+
+    信息容量对齐完整攻略：去哪、怎么玩、怎么走、看什么、拍什么、怎么预约、有什么坑与替代方案。
+    """
+
     activity_id: str = ""
-    start_time: str = Field(description="24小时制 HH:MM")
-    end_time: str = Field(description="24小时制 HH:MM")
+    period: str | None = Field(default=None, description="如「上午」「下午」「傍晚」「晚上」")
+    start_time: str | None = Field(default=None, description="24小时制 HH:MM")
+    end_time: str | None = Field(default=None, description="24小时制 HH:MM")
     title: str
-    location: str
-    description: str = ""
-    estimated_cost_cny_per_person: int = Field(default=0, ge=0)
+    description: str | None = Field(default=None, description="活动内容/怎么玩")
+    route: list[str] = Field(default_factory=list, description="推荐路线，如「龙龛码头 → 才村 → 磻溪S湾」")
+    highlights: list[str] = Field(default_factory=list, description="打卡点/看什么")
+    photo_spots: list[str] = Field(default_factory=list, description="📸 推荐打卡/拍照位置")
+    pois: list[Poi] = Field(default_factory=list, description="涉及的景点/店铺卡片，含名称与地址")
+    location: str | None = None
+    transportation: str | None = Field(default=None, description="到达/移动方式与耗时")
+    estimated_cost: str | None = Field(default=None, description="参考花费，如「约90元」「免费」「1.5-3.5元/个」")
+    booking_notes: list[str] = Field(default_factory=list, description="🎫 预约/购票/开放说明")
+    tips: list[str] = Field(default_factory=list, description="💡 小贴士")
+    alternatives: list[str] = Field(default_factory=list, description="备选方案/停运替代")
+    source_url: str | None = None
 
 
 class Transportation(BaseModel):
@@ -94,7 +92,7 @@ class Transportation(BaseModel):
     to_location: str
     mode: str
     estimated_duration_minutes: int | None = Field(default=None, ge=0)
-    estimated_cost_cny_per_person: int = Field(default=0, ge=0)
+    estimated_cost: str | None = Field(default=None, description="参考花费，如「约30元」")
 
 
 class Accommodation(BaseModel):
@@ -102,44 +100,131 @@ class Accommodation(BaseModel):
     area: str
     type: str
     name: str | None = None
-    estimated_cost_cny_per_room: int = Field(default=0, ge=0)
+    estimated_cost: str | None = Field(default=None, description="参考价格，如「约400元/晚」")
 
 
 class DayPlan(BaseModel):
     day_id: str = ""
     day: int = Field(ge=1)
     date: Date | None = None
+    title: str | None = Field(default=None, description="当日主题，如「老门东夫子庙 Citywalk」")
     city: str
+    summary: str | None = None
     activities: list[Activity] = Field(default_factory=list)
     transportation: list[Transportation] = Field(default_factory=list)
     accommodation: Accommodation | None = None
-    estimated_daily_cost_cny_per_person: int = Field(default=0, ge=0)
+    day_tips: list[str] = Field(default_factory=list, description="当日注意事项")
 
 
-class BudgetSummary(BaseModel):
-    transportation_cny_per_person: int = Field(default=0, ge=0)
-    accommodation_cny_per_person: int = Field(default=0, ge=0)
-    food_cny_per_person: int = Field(default=0, ge=0)
-    tickets_cny_per_person: int = Field(default=0, ge=0)
-    other_cny_per_person: int = Field(default=0, ge=0)
-    total_cny_per_person: int = Field(default=0, ge=0)
+class FoodRecommendation(BaseModel):
+    """独立美食推荐（不是日程里的一个条目）。"""
+
+    name: str
+    category: str | None = Field(default=None, description="分类，如「老门东必吃小吃」「正餐菜馆」「本地口碑老店」")
+    area: str | None = None
+    address: str | None = None
+    recommended_dishes: list[str] = Field(default_factory=list)
+    price_reference: str | None = Field(default=None, description="如「牛肉锅贴约12元/份」")
+    description: str | None = Field(default=None, description="推荐理由")
+    best_time: str | None = None
+    tips: list[str] = Field(default_factory=list)
+    source_url: str | None = None
+
+
+class AttractionGuide(BaseModel):
+    """独立景点深度攻略，承载历史背景、看点与拍照位置。"""
+
+    name: str
+    introduction: str | None = Field(default=None, description="景点介绍")
+    history: str | None = Field(default=None, description="历史/文化背景")
+    highlights: list[str] = Field(default_factory=list, description="核心看点")
+    recommended_duration: str | None = Field(default=None, description="建议游览时长")
+    ticket_info: str | None = None
+    opening_hours: str | None = None
+    booking_info: str | None = Field(default=None, description="预约说明")
+    photo_spots: list[str] = Field(default_factory=list, description="拍照位置建议")
+    best_visit_time: str | None = None
+    tips: list[str] = Field(default_factory=list)
+    source_url: str | None = None
+
+
+class AccommodationRecommendation(BaseModel):
+    """独立住宿推荐。"""
+
+    name: str | None = None
+    area: str | None = None
+    address: str | None = None
+    type: str | None = Field(default=None, description="如「舒适型酒店」「民宿」")
+    price_reference: str | None = None
+    description: str | None = None
+    tips: list[str] = Field(default_factory=list)
+    source_url: str | None = None
+
+
+class WeatherReference(BaseModel):
+    """单个时段/月份的天气参考。"""
+
+    month: str | None = Field(default=None, description="如「6月」「7月」")
+    summary: str = Field(description="该月天气/温度/降雨/穿衣要点")
+
+
+class TransportationGuide(BaseModel):
+    """一段城际/主要移动方式的完整说明。"""
+
+    from_location: str
+    to_location: str
+    mode: str | None = Field(default=None, description="如「高铁」「飞机」「大巴」")
+    duration: str | None = Field(default=None, description="用时，如「约2小时」")
+    price: str | None = Field(default=None, description="价格，如「约145元/人」")
+    departure_station: str | None = Field(default=None, description="出发站/机场")
+    arrival_station: str | None = Field(default=None, description="到达站/机场")
+    schedule: str | None = Field(default=None, description="班次/时刻建议")
+    suggestion: str | None = Field(default=None, description="建议，如「提前订票」")
+
+
+class BudgetBreakdown(BaseModel):
+    """预算分项参考。"""
+
+    item: str = Field(description="如「住宿」「餐饮」「景点」「市内交通」「城际交通」")
+    per_person: str = Field(description="人均参考，如「约800元」")
 
 
 class PlanDraft(BaseModel):
-    """LLM 生成、尚未持久化的计划。"""
+    """LLM 生成、尚未持久化的计划。
+
+    信息容量覆盖完整攻略：基础信息、天气、逐日行程、城际交通、景点深度攻略、美食、住宿、预算与出行准备。
+    费用字段一律用字符串（如「约90元」「免费」），不用数值，避免 Schema 解析被自由文本价格卡死。
+    """
 
     title: str
+    subtitle: str | None = Field(default=None, description="一行简介，如「2026年6-7月 · 情侣二人 · 松弛逛吃」")
     requirements: TravelRequirements
-    schedule: list[DayPlan]
-    budget_summary: BudgetSummary = Field(default_factory=BudgetSummary)
+
+    overview: str | None = Field(default=None, description="整体规划思路/路线逻辑")
+    weather_summary: str | None = Field(default=None, description="天气整体概述")
+    weather_details: list[WeatherReference] = Field(default_factory=list, description="按月/分时段的天气参考")
+    weather_tip: str | None = Field(default=None, description="天气实用提醒，如「携带防晒用品、雨具并及时补水」")
+
+    schedule: list[DayPlan] = Field(default_factory=list)
+
+    transportation_guide: list[TransportationGuide] = Field(default_factory=list, description="城际/主要移动方式说明")
+
+    food_recommendations: list[FoodRecommendation] = Field(default_factory=list)
+    food_route: list[str] = Field(default_factory=list, description="美食逛吃路线，如「早餐:科巷/红庙 → 锅贴配鸭血汤」")
+    attraction_guides: list[AttractionGuide] = Field(default_factory=list)
+    accommodation_recommendations: list[AccommodationRecommendation] = Field(default_factory=list)
+
+    budget_breakdown: list[BudgetBreakdown] = Field(default_factory=list, description="预算分项参考")
+    budget_total: str | None = Field(default=None, description="预计总计，如「两人约5000-7000元（不含大交通）」")
+
+    booking_tips: list[str] = Field(default_factory=list)
+    transportation_tips: list[str] = Field(default_factory=list)
+    clothing_tips: list[str] = Field(default_factory=list)
+    photo_tips: list[str] = Field(default_factory=list)
+    budget_tips: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
     assumptions: list[str] = Field(default_factory=list)
-
-
-class ValidationIssue(BaseModel):
-    code: str
-    severity: Severity
-    target: str | None = None
-    message: str
 
 
 class PlanningTask(BaseModel):
@@ -148,7 +233,6 @@ class PlanningTask(BaseModel):
     session_id: str
     state: TaskState
     requirements: TravelRequirements = Field(default_factory=TravelRequirements)
-    repair_count: int = 0
     delivered_plan_id: str | None = None
     last_error_code: str | None = None
     created_at: datetime
@@ -156,14 +240,20 @@ class PlanningTask(BaseModel):
 
 
 class PlanDocument(PlanDraft):
-    """正式持久化的 PlanVersion 文档。"""
+    """正式持久化的当前计划文档；每个 plan_id 只保留这一份最新内容。"""
 
     plan_id: str
-    version: int = 1
-    parent_version: int | None = None
     user_id: str
     session_id: str
     created_at: datetime
+
+    _META_FIELDS = {"plan_id", "user_id", "session_id", "created_at"}
+
+    def to_draft(self) -> PlanDraft:
+        """转回纯 PlanDraft（去掉持久化元数据），供修改工具作为 LLM 输入。"""
+        data = {k: v for k, v in self.model_dump().items() if k not in self._META_FIELDS}
+        return PlanDraft.model_validate(data)
+
 
 
 def merge_requirements(
@@ -220,9 +310,6 @@ def normalize_plan_draft(draft: PlanDraft, requirements: TravelRequirements) -> 
             transport.trans_id = f"d{day_index}_t{trans_index}"
         if day.accommodation is not None:
             day.accommodation.acc_id = f"d{day_index}_acc"
-
-    total = sum(day.estimated_daily_cost_cny_per_person for day in data.schedule)
-    data.budget_summary.total_cny_per_person = total
 
     if requirements.origin is None:
         assumption = "本计划按当地行程规划，不包含出发城市到目的地的大交通。"

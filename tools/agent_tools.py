@@ -2,6 +2,9 @@
 
 底层 API 实现继续放在 tools.weather / tools.search / tools.route；本模块只负责
 把它们包装成有清晰契约的 LangChain Tools，供主 Agent 与 Planning Workflow 复用。
+
+原则：只有需要模型自主选择调用时机的能力才做成 Tool。
+读/写 Plan 是 Workflow 固定流程步骤，由 Workflow 直接调用 Repository，不做成 Tool。
 """
 from __future__ import annotations
 
@@ -46,7 +49,6 @@ async def search_travel_info(
         topic: general（综合）/ news（新闻）。
         search_depth: basic（快）/ advanced（深）。
     """
-    # search_web 是同步网络调用，放入线程，避免阻塞 Planning Workflow 的事件循环。
     return await asyncio.to_thread(
         _search_web,
         query,
@@ -60,7 +62,7 @@ async def search_travel_info(
 async def search_maps(origin: str, destination: str, mode: str = "driving") -> str:
     """查询两个地点之间的路线，返回距离、耗时和逐向指引。
 
-    用户问“怎么去、多远、多久、坐什么车”，或规划阶段需要验证地点间交通时使用。
+    用户问"怎么去、多远、多久、坐什么车"，或规划阶段需要验证地点间交通时使用。
 
     Args:
         origin: 起点地址，如 "北京西站"。

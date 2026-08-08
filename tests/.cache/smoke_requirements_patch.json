@@ -1,0 +1,20 @@
+{
+  "origin": null,
+  "destinations": [
+    "云南大理",
+    "丽江"
+  ],
+  "start_date": null,
+  "end_date": null,
+  "duration_days": 3,
+  "traveler_count": 2,
+  "budget_per_person_cny": 3000,
+  "pace": null,
+  "must_visit": [
+    "洱海",
+    "玉龙雪山"
+  ],
+  "exclude": null,
+  "accommodation_preference": null,
+  "notes": null
+}

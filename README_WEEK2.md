@@ -9,16 +9,14 @@ agent.py                  # 替换：挂载 CompiledSubAgent + InMemorySaver
 cli.py                    # 替换：同一 REPL thread_id 保持多轮对话
 planning/
   models.py               # Requirements / PlanDraft / PlanningTask / PlanDocument
-  validator.py            # 纯代码 Validator
   repository.py           # SQLite 业务事实源（生产换 PostgreSQL）
-  intelligence.py         # LLM 抽取 / Research Agent / Generate / Repair
+  intelligence.py         # LLM 抽取 / Research Agent / Generate / Format Repair
   workflow.py             # LangGraph 确定性 Planning Workflow
   __init__.py
 tools/
   agent_tools.py          # 从旧 agent.py 抽出的 @tool 包装，主 Agent/Workflow 复用
 tests/
   test_models.py
-  test_validator.py
   test_repository.py
   test_workflow.py
 ```
@@ -82,7 +80,7 @@ uv run python -m cli
 你：帮我规划云南5日游
 助手：...询问出行人数...
 你：2个人，10月1日出发，预算每人5000
-助手：...Research → Generate → Validate → Plan V1...
+助手：...Research → Generate（Schema Parse → Format Repair）→ 保存当前 Plan...
 ```
 
 普通问答仍应正常：
@@ -101,9 +99,8 @@ uv run pytest -q
 测试分层：
 
 - models：需求合并、日期计算、必填判断
-- validator：时间冲突、预算、稳定 ID 等硬规则
-- repository：PlanningTask 与 Plan V1 持久化
-- workflow：使用 FakeIntelligence，不请求真实 LLM/API，验证“收集 → 补充 → repair → 完成”状态链
+- repository：PlanningTask 与当前 Plan 持久化
+- workflow：使用 FakeIntelligence，不请求真实 LLM/API，验证“收集 → 补充 → 生成 → 保存”状态链
 
 ## Week 2 明确不做
 
@@ -124,4 +121,5 @@ uv run pytest -q
 4. Subagent 本身每次调用仍是短生命周期；跨轮续接依赖 SQLite `planning_tasks`，不是依赖 Subagent 常驻。
 5. Main Agent 的多轮聊天上下文由 `InMemorySaver` 保存，仅用于当前 CLI 进程。
 6. Plan stable ID 由代码统一分配，不把唯一性寄托在 LLM 的心情上。
-7. Validator 最多允许 2 次语义 repair；仍失败则任务进入 `failed`。
+7. 不做业务 Validator：只做 Schema Parse，失败时由 LLM 做一次 Format Repair（只改格式不改语义）；仍失败则任务进入 `failed`。
+8. Plan 不保留多版本：一个 session 一份 current_plan，修改直接覆盖。
