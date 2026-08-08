@@ -8,7 +8,6 @@ from pydantic import BaseModel, Field, model_validator
 
 
 Pace = Literal["relaxed", "moderate", "intense", "comfortable"]
-TaskState = Literal["collecting", "processing", "completed", "failed", "cancelled"]
 
 
 class TravelRequirements(BaseModel):
@@ -227,33 +226,22 @@ class PlanDraft(BaseModel):
     assumptions: list[str] = Field(default_factory=list)
 
 
-class PlanningTask(BaseModel):
-    task_id: str
-    user_id: str
-    session_id: str
-    state: TaskState
-    requirements: TravelRequirements = Field(default_factory=TravelRequirements)
-    delivered_plan_id: str | None = None
-    last_error_code: str | None = None
-    created_at: datetime
-    updated_at: datetime
-
 
 class PlanDocument(PlanDraft):
-    """正式持久化的当前计划文档；每个 plan_id 只保留这一份最新内容。"""
+    """正式持久化的当前计划文档；每个 session 只保留一份 current Plan。"""
 
     plan_id: str
     user_id: str
     session_id: str
     created_at: datetime
+    updated_at: datetime
 
-    _META_FIELDS = {"plan_id", "user_id", "session_id", "created_at"}
+    _META_FIELDS = {"plan_id", "user_id", "session_id", "created_at", "updated_at"}
 
     def to_draft(self) -> PlanDraft:
-        """转回纯 PlanDraft（去掉持久化元数据），供修改工具作为 LLM 输入。"""
+        """去掉持久化元数据，返回可供 Agent 修改/展示的纯 PlanDraft。"""
         data = {k: v for k, v in self.model_dump().items() if k not in self._META_FIELDS}
         return PlanDraft.model_validate(data)
-
 
 
 def merge_requirements(

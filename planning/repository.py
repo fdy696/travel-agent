@@ -1,10 +1,15 @@
-"""领域存储。
+"""Travel Plan 领域存储。
 
-CLI/MVP 使用 SQLite，接口刻意保持领域 Repository 形态；生产环境替换成 PostgreSQL
-时，Planning Workflow 不需要改控制流。
+当前版本仍使用 SQLite 作为 CLI/MVP persistence；Agent 架构与 Repository 接口解耦，
+后续替换 PostgreSQL 不需要改变 Agent 的 reasoning loop。
+
+Repository 只保存系统事实，不负责语义规划：
+- planning_requirements: 当前 session 尚未完成的需求草稿
+- plans: 当前 session 唯一的 current Plan
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import uuid
@@ -12,18 +17,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
-from planning.models import PlanDocument, PlanDraft
+from planning.models import PlanDocument, PlanDraft, TravelRequirements
 
 
 class PlanNotFound(Exception):
-    """指定 plan 不存在或不属于当前 user_id。"""
+    """当前 Plan 不存在。"""
+
+
+class PlanAlreadyExists(Exception):
+    """当前 session 已经存在 Plan，应使用 update_current_plan。"""
 
 
 class PlanningRepository(Protocol):
+    def get_requirements_draft(self, *, user_id: str, session_id: str) -> TravelRequirements | None: ...
+    def save_requirements_draft(self, *, user_id: str, session_id: str, requirements: TravelRequirements) -> None: ...
+    def clear_requirements_draft(self, *, user_id: str, session_id: str) -> None: ...
+
     def create_plan(self, *, user_id: str, session_id: str, draft: PlanDraft) -> PlanDocument: ...
-    def get_active_plan_for_session(self, *, user_id: str, session_id: str) -> PlanDocument | None: ...
-    def get_plan(self, *, plan_id: str, user_id: str) -> PlanDocument | None: ...
-    def update_plan(self, *, plan_id: str, user_id: str, new_draft: PlanDraft) -> PlanDocument: ...
+    def get_current_plan(self, *, user_id: str, session_id: str) -> PlanDocument | None: ...
+    def update_current_plan(self, *, user_id: str, session_id: str, new_draft: PlanDraft) -> PlanDocument: ...
 
 
 def _now() -> datetime:
@@ -63,10 +75,69 @@ class SQLitePlanningRepository:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_plans_session
-                    ON plans(user_id, session_id, updated_at DESC);
+
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_plans_user_session
+                    ON plans(user_id, session_id);
+
+                CREATE TABLE IF NOT EXISTS planning_requirements (
+                    user_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    requirements_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, session_id)
+                );
                 """
             )
+
+    # ---------- Requirements Draft ----------
+
+    def get_requirements_draft(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+    ) -> TravelRequirements | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT requirements_json
+                FROM planning_requirements
+                WHERE user_id = ? AND session_id = ?
+                """,
+                (user_id, session_id),
+            ).fetchone()
+        return TravelRequirements.model_validate_json(row["requirements_json"]) if row else None
+
+    def save_requirements_draft(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        requirements: TravelRequirements,
+    ) -> None:
+        now = _now().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO planning_requirements (
+                    user_id, session_id, requirements_json, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, session_id)
+                DO UPDATE SET
+                    requirements_json = excluded.requirements_json,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, session_id, requirements.model_dump_json(), now),
+            )
+
+    def clear_requirements_draft(self, *, user_id: str, session_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM planning_requirements WHERE user_id = ? AND session_id = ?",
+                (user_id, session_id),
+            )
+
+    # ---------- Current Plan ----------
 
     def create_plan(
         self,
@@ -75,27 +146,24 @@ class SQLitePlanningRepository:
         session_id: str,
         draft: PlanDraft,
     ) -> PlanDocument:
-        """为 session 创建当前计划；session 已有计划时直接返回现有内容（幂等）。"""
+        """创建 current Plan。session 已有 Plan 时拒绝，避免误覆盖。"""
         with self._connect() as conn:
-            existing_row = conn.execute(
-                """
-                SELECT plan_json FROM plans
-                WHERE user_id = ? AND session_id = ?
-                ORDER BY updated_at DESC LIMIT 1
-                """,
+            existing = conn.execute(
+                "SELECT 1 FROM plans WHERE user_id = ? AND session_id = ?",
                 (user_id, session_id),
             ).fetchone()
-            if existing_row:
-                return PlanDocument.model_validate_json(existing_row["plan_json"])
+            if existing:
+                raise PlanAlreadyExists("当前 session 已存在 Plan，请使用 update_current_plan")
 
             plan_id = f"plan_{uuid.uuid4().hex[:16]}"
-            created_at = _now()
+            now = _now()
             document = PlanDocument(
                 **draft.model_dump(),
                 plan_id=plan_id,
                 user_id=user_id,
                 session_id=session_id,
-                created_at=created_at,
+                created_at=now,
+                updated_at=now,
             )
             conn.execute(
                 """
@@ -109,85 +177,99 @@ class SQLitePlanningRepository:
                     session_id,
                     document.model_dump_json(),
                     document.title,
-                    created_at.isoformat(),
-                    created_at.isoformat(),
+                    now.isoformat(),
+                    now.isoformat(),
                 ),
             )
             return document
 
-    def get_plan(self, *, plan_id: str, user_id: str) -> PlanDocument | None:
+    def get_current_plan(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+    ) -> PlanDocument | None:
         with self._connect() as conn:
-            return self._get_plan_with_conn(conn, plan_id, user_id)
+            row = conn.execute(
+                """
+                SELECT plan_json, plan_id, user_id, session_id, created_at, updated_at
+                FROM plans
+                WHERE user_id = ? AND session_id = ?
+                LIMIT 1
+                """,
+                (user_id, session_id),
+            ).fetchone()
+        return self._row_to_document(row) if row else None
 
+    # 兼容 week_03 旧调用名称，重构完成后可删除。
     def get_active_plan_for_session(
         self,
         *,
         user_id: str,
         session_id: str,
     ) -> PlanDocument | None:
-        """按 (user_id, session_id) 取当前计划。"""
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT plan_json FROM plans
-                WHERE user_id = ? AND session_id = ?
-                ORDER BY updated_at DESC
-                LIMIT 1
-                """,
-                (user_id, session_id),
-            ).fetchone()
-            return PlanDocument.model_validate_json(row["plan_json"]) if row else None
+        return self.get_current_plan(user_id=user_id, session_id=session_id)
 
-    def update_plan(
+    def update_current_plan(
         self,
         *,
-        plan_id: str,
         user_id: str,
+        session_id: str,
         new_draft: PlanDraft,
     ) -> PlanDocument:
-        """覆盖 current_plan，返回最新内容；不保留历史版本。"""
+        """覆盖 current Plan；不创建版本链。"""
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT session_id FROM plans WHERE plan_id = ? AND user_id = ?",
-                (plan_id, user_id),
+                """
+                SELECT plan_id, created_at
+                FROM plans
+                WHERE user_id = ? AND session_id = ?
+                """,
+                (user_id, session_id),
             ).fetchone()
             if row is None:
-                raise PlanNotFound(f"plan {plan_id} 不存在或无权访问")
+                raise PlanNotFound("当前 session 没有可修改的 Plan")
 
             updated_at = _now()
+            created_at = datetime.fromisoformat(row["created_at"])
             document = PlanDocument(
                 **new_draft.model_dump(),
-                plan_id=plan_id,
+                plan_id=row["plan_id"],
                 user_id=user_id,
-                session_id=row["session_id"],
-                created_at=updated_at,
+                session_id=session_id,
+                created_at=created_at,
+                updated_at=updated_at,
             )
             conn.execute(
                 """
                 UPDATE plans
                 SET plan_json = ?, title = ?, updated_at = ?
-                WHERE plan_id = ? AND user_id = ?
+                WHERE user_id = ? AND session_id = ?
                 """,
                 (
                     document.model_dump_json(),
                     document.title,
                     updated_at.isoformat(),
-                    plan_id,
                     user_id,
+                    session_id,
                 ),
             )
             conn.commit()
             return document
 
-    def _get_plan_with_conn(
-        self,
-        conn: sqlite3.Connection,
-        plan_id: str,
-        user_id: str,
-    ) -> PlanDocument | None:
-        row = conn.execute(
-            "SELECT plan_json FROM plans WHERE plan_id = ? AND user_id = ?",
-            (plan_id, user_id),
-        ).fetchone()
-        return PlanDocument.model_validate_json(row["plan_json"]) if row else None
+    def _row_to_document(self, row: sqlite3.Row) -> PlanDocument:
+        # 历史 week_03 的 plan_json 只有 created_at、没有 updated_at。
+        # 这里把 JSON 当作 PlanDraft 内容读取，metadata 一律以表列为 canonical。
+        payload = json.loads(row["plan_json"])
+        for key in ("plan_id", "user_id", "session_id", "created_at", "updated_at"):
+            payload.pop(key, None)
+        draft = PlanDraft.model_validate(payload)
+        return PlanDocument(
+            **draft.model_dump(),
+            plan_id=row["plan_id"],
+            user_id=row["user_id"],
+            session_id=row["session_id"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )

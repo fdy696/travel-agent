@@ -1,59 +1,65 @@
-"""主 Agent 构建（v4.1 / Deep Agents）。
+"""Main Deep Agent：自然路由 + 一个 Travel Plan 专业 SubAgent。
 
 架构：
-- Main Agent：Deep Agents ReAct / Tool Calling，持有通用旅游问答工具。
-- travel-planning CompiledSubAgent：统一负责行程的创建 + 修改两个场景。
-  Workflow 内部通过 detect_intent 节点路由：
-    首次规划/补充需求 → extract_requirements → research → generate → persist → finish
-    已有计划的修改   → modify（内部 Agent Loop，按需 Research）
-- 业务状态：SQLitePlanningRepository（CLI/MVP；生产替换 PostgreSQL）。
-- 会话消息：InMemorySaver（CLI/开发；生产需持久化 checkpointer）。
+- Main Agent：普通问答、实时工具调用、conversation-context 内的 Plan 追问。
+- travel-planning declarative SubAgent：所有 Plan mutation（创建 + 修改），用于 context quarantine。
+- Requirements / Current Plan：Repository canonical state。
+- Skills：Travel Plan procedure，按需加载。
+- 不使用自定义 Planning LangGraph Workflow。
 """
 from __future__ import annotations
 
-from deepagents import CompiledSubAgent, create_deep_agent
+from pathlib import Path
+
+from deepagents import FilesystemPermission, create_deep_agent
+from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
 from langchain_deepseek import ChatDeepSeek
 from langgraph.checkpoint.memory import InMemorySaver
 
 from config import get_settings, require_key
-from planning.intelligence import LLMPlanningIntelligence
+from planning.domain_tools import build_plan_domain_tools
+from planning.plan_agent import build_travel_plan_subagent
 from planning.repository import SQLitePlanningRepository
-from planning.workflow import build_planning_graph
 from planning.runtime import TravelRuntimeContext
 from tools.agent_tools import TRAVEL_TOOLS
 
 
-TRAVEL_AGENT_SYSTEM_PROMPT = """你是"行伴"旅游助手，一位专业、贴心、务实的旅行伙伴。
+BASE_DIR = Path(__file__).resolve().parent
+SKILLS_DIR = BASE_DIR / "skills"
 
-# 通用问答
-- 闲聊、旅游常识可以直接回答。
+
+TRAVEL_AGENT_SYSTEM_PROMPT = """你是“行伴”旅游助手，一位专业、贴心、务实的旅行伙伴。
+
+# 普通问答
+- 闲聊、稳定的旅游常识可以直接回答。
 - 天气、交通、价格、营业时间、攻略等实时/可变信息必须调用对应工具后回答。
-- 查当前/近 3 天天气用 get_weather；更远日期的季节气候用 search_travel_info。
-- 查路线、距离、耗时用 search_maps。
+- 当前/近 3 天天气用 get_weather；更远日期的季节气候使用联网搜索。
+- 路线、距离、耗时使用 search_maps。
 
-# 行程规划（创建 + 修改，统一委派给 travel-planning）
-以下所有情况必须通过 task 委派给 subagent_type="travel-planning"，不要自己生成多日计划：
+# Conversation Context 优先
+用户对刚生成/刚修改的行程做简单追问，例如“第二天住哪”“为什么这样安排”，
+只要当前 conversation context 足够，直接回答，不要重新委派，也不要为了形式再查数据库。
+只有上下文已经不足、被压缩，或者用户明确要求“当前最终保存版本”时，才调用 get_current_plan 读取 canonical state。
 
-1. 用户要求"规划/安排/制定一个多日行程"（首次规划）。
-2. travel-planning 上一轮提示缺少信息，本轮用户补充了目的地/人数/天数等。
-3. 用户要求对已交付行程做任何修改（删活动、调天数、换目的地、改预算、改节奏等）。
-4. 用户对已交付行程追问细节，需要完整内容才能回答。
+# Plan Mutation
+当用户希望改变 Plan 时，通过 task 委派给 subagent_type="travel-planning"：
+- 创建一个新的完整多日行程
+- 上一轮规划缺信息，本轮继续补充
+- 修改/删除/增加活动
+- 延长/缩短天数
+- 换目的地、预算、节奏、住宿方案
+- 重新规划当前行程
 
-委派方式：
-- description 填用户本轮的原始表述 + 必要上下文（"用户已有行程，要求修改：……"）；
-- travel-planning 内部会自动判断是首次规划还是修改，你不需要区分。
+Main Agent 不需要再做 create/modify 二次意图分类；只判断“这是不是 Plan mutation”。
+委派时 description 使用用户本轮原话；只有本轮表述过短或存在歧义时，补一小段必要上下文。
 
-travel-planning 返回"还需要信息"时，把它的问题自然地转达给用户。
-travel-planning 返回完整攻略或修改确认时，**必须原样、完整地转达**，不得概括或改写。
+travel-planning 返回缺信息问题时，自然转达给用户。
+返回完整 Markdown 时必须原样完整转达，不再次总结、压缩或改写。
 
 # 边界
-- 用户只是问天气/攻略/路线，不要启动规划。
-- 不暴露内部工具名、subagent 名、task_id、plan_id 等技术细节。
-
-# 回复风格
-- 简洁、直接、口语化。
+- 普通天气/攻略/路线问题不要启动 travel-planning。
+- 不暴露内部工具名、subagent 名、user_id、session_id、plan_id 等技术细节。
 - 不编造实时事实。
-- 一次只追问真正阻塞任务的信息。
 """
 
 
@@ -64,10 +70,19 @@ def _build_llm() -> ChatDeepSeek:
         temperature=0.3,
         max_tokens=32000,
         max_retries=3,
-        extra_body={
-            "thinking": {
-                "type": "disabled",
-            }
+        extra_body={"thinking": {"type": "disabled"}},
+    )
+
+
+def _build_backend() -> CompositeBackend:
+    # default StateBackend 只保存 agent scratch files；/skills/ 映射到项目内只读 Skill。
+    return CompositeBackend(
+        default=StateBackend(),
+        routes={
+            "/skills/": FilesystemBackend(
+                root_dir=SKILLS_DIR,
+                virtual_mode=True,
+            ),
         },
     )
 
@@ -75,31 +90,22 @@ def _build_llm() -> ChatDeepSeek:
 def build_agent():
     llm = _build_llm()
     repository = SQLitePlanningRepository()
-    intelligence = LLMPlanningIntelligence(llm)
-    planning_graph = build_planning_graph(
-        intelligence=intelligence,
-        repository=repository,
-        checkpointer=InMemorySaver(),
-    )
+    domain_tools = build_plan_domain_tools(repository)
+    planning_subagent = build_travel_plan_subagent(domain_tools=domain_tools)
 
-    planning_subagent = CompiledSubAgent(
-        name="travel-planning",
-        description=(
-            "统一负责旅游行程的创建与修改。"
-            "用于：首次规划多日行程、补充规划需求、对已交付行程做任何修改。"
-            "内部自动判断场景（首次规划 vs 修改），Main Agent 无需区分。"
-            "不要用于简单天气/攻略/路线问答。"
-        ),
-        runnable=planning_graph,
-    )
-
-    # SubAgentMiddleware 注入 `task` 工具；调用时 description 是本轮用户任务描述，
-    # runtime context（TravelRuntimeContext）从父 run 自动透传到子图。
     return create_deep_agent(
         model=llm,
         system_prompt=TRAVEL_AGENT_SYSTEM_PROMPT,
-        tools=TRAVEL_TOOLS,
+        tools=[*TRAVEL_TOOLS, domain_tools.get_current_plan],
         subagents=[planning_subagent],
+        backend=_build_backend(),
+        permissions=[
+            FilesystemPermission(
+                operations=["write"],
+                paths=["/skills/**"],
+                mode="deny",
+            ),
+        ],
         checkpointer=InMemorySaver(),
         context_schema=TravelRuntimeContext,
         name="travel_agent",

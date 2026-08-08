@@ -1,10 +1,9 @@
 """LangChain/Deep Agents 可见的旅游业务工具。
 
 底层 API 实现继续放在 tools.weather / tools.search / tools.route；本模块只负责
-把它们包装成有清晰契约的 LangChain Tools，供主 Agent 与 Planning Workflow 复用。
+把它们包装成有清晰契约的 LangChain Tools，供 Main Agent 与 Travel Plan SubAgent 自主调用。
 
-原则：只有需要模型自主选择调用时机的能力才做成 Tool。
-读/写 Plan 是 Workflow 固定流程步骤，由 Workflow 直接调用 Repository，不做成 Tool。
+原则：Research Tools 只提供外部事实能力；Plan 的确定性状态操作放在 planning/domain_tools.py。
 """
 from __future__ import annotations
 
