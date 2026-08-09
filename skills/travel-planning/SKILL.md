@@ -7,7 +7,8 @@ description: 创建、重新规划或修改完整旅行行程的专业旅行规�
 
 生成真实可执行、路线合理、符合用户偏好的完整旅行计划。
 
-Main Agent 始终负责最终判断、最终规划和最终回答。本 Skill 提供规划方法和输出规范，不定义固定 Workflow。
+Main Agent 始终负责最终判断、最终规划和最终回答。
+本 Skill 提供规划方法和输出规范，不定义固定 Workflow。
 
 ## 1. 理解旅行需求
 
@@ -26,101 +27,82 @@ Main Agent 始终负责最终判断、最终规划和最终回答。本 Skill �
 
 不要把旅行规划变成问卷。
 
-如果已经知道目的地和可用日期 / 天数，通常直接开始规划。对不会明显改变整体方案的信息采用合理假设。只有缺失信息会显著改变整个行程、且无法安全假设时，才进行简洁追问。
+如果已经知道目的地和可用日期 / 天数，通常直接开始规划。
+对不会明显改变整体方案的信息采用合理假设。
+只有缺失信息会显著改变整个行程、且无法安全假设时，才进行简洁追问。
 
-## 2. 按需要进行 Research
+## 2. Travel Researcher
 
-Research 只用于提高正确性、时效性和路线可执行性，不要为了调用 Tool 而调用 Tool。
+完整旅行规划天然需要多主题 Research。
 
-### 天气
+只要进入以下任一模式：
 
-当前或近期天气使用 `get_weather`。
+- 创建完整旅行计划
+- 重新规划完整旅行
+- 修改已有完整旅行计划
 
-超出可靠预报范围时，不得把季节气候描述成真实天气预报；可使用 `search_travel_info` 查询季节特点、历史温度范围和常见降雨趋势，并明确这是季节性参考。
+Main 必须调用：
 
-### 路线与交通
+`task(subagent_type="travel-researcher", description="...")`
 
-当真实距离或交通时间影响规划时使用 `search_maps`，例如：
+由 Travel Researcher 在独立 Context 中完成所有与最终计划有关的外部 Research。
 
-- 跨区域 / 跨城市移动
-- 判断路线是否折返
-- 判断一天多个地点是否现实
-- 比较自驾与公共交通
-- 关键交通耗时
+固定链路：
 
-不要仅凭地名印象估算实际交通时间。
+`Main → travel-planning Skill → Travel Researcher → Research Findings → Markdown Contract → Main Final Synthesis`
 
-### 时效信息
+规划模式下：
 
-以下信息可能变化时使用 `search_travel_info`：
+- Main 不直接调用 `search_travel_info`
+- Main 不直接调用 `search_maps`
+- Main 不直接调用 `get_weather`
+- Research 中间 Tool Result 留在 Travel Researcher Context
+- Main 只接收 Research Findings
+- 如果 Findings 有影响最终计划的关键缺口，继续委派 Travel Researcher 补充
 
-- 开放时间
-- 闭馆日
-- 临时关闭
-- 最晚入场时间
+Travel Researcher 只负责 Research，不生成最终完整旅行计划。
+
+### Research Brief
+
+Main 的委派描述必须自包含，至少包括：
+
+1. Runtime 当前日期、星期、时区、年份
+2. 旅行背景
+3. 用户约束
+4. Research 目标
+5. Research 范围
+6. 当前信息的新鲜度要求
+7. Anti-confirmation 要求
+8. Research Findings 返回要求
+9. “只做 Research、不生成最终计划”的职责边界
+
+普通旅行问答不是完整旅行规划，可由 Main 按需直接调用 Tool。
+
+## 3. Research 新鲜度
+
+当前旅行事实必须以 Runtime 当前时间为基准。
+
+对于：
+
+- 门票 / Pass 价格
 - 预约规则
-- 门票政策
+- 开放 / 闭馆时间
 - 当前运营状态
-- 节假日安排
-- 最近交通政策
+- 交通政策
+- 节假日特殊安排
+- 其他易变化事实
 
-只有信息会影响计划或用户决策时才查询，不要因为出现景点名称就自动搜索。
+Research 必须：
 
-Tool 查询失败时，不编造查询结果、精确时间或精确价格；保留不确定性，并在必要时提醒用户出发前再次确认。
+- 优先 latest / current / official / 最新 / 当前 / 官方
+- 用户未询问历史时，不主动使用旧年份
+- 需要年份时使用 Runtime 当前年份
+- 旧资料不能直接当作当前事实
+- 无法确认时明确标记不确定性
+- 不把未经确认的模型猜测写进下一轮 Query 当作前提
 
-## 3. 必要时委派 general-purpose
-
-不创建业务专用 Travel Researcher。普通旅行 Research 由 Main Agent 直接使用 Tool 完成。
-
-只有当一个相对独立的研究子任务需要多步骤搜索、比较或核验，并且大量中间 Tool Result 会明显污染 Main Agent 当前上下文时，才使用 Deep Agents 的 `task` 工具委派给 `general-purpose`。
-
-适合委派：
-
-- 多城市复杂旅行
-- 大量跨来源事实核验
-- 多种交通方案 / Pass 系统比较
-- 大量预约规则研究
-- 多套路线候选方案比较
-- 预计需要连续多次 Search / Maps / Weather 调用的独立研究任务
-
-不适合委派：
-
-- 单次事实查询
-- 一两次 Tool Call 可以解决的问题
-- 普通三五日行程中很轻量的 Research
-- 最终路线选择
-- 最终完整旅行计划生成
-
-### Delegation Brief
-
-调用 `task` 时使用 `subagent_type="general-purpose"`。
-
-`description` 必须提供足够上下文，使 subagent 不依赖 Main conversation 也能独立完成任务。至少包含：
-
-1. **旅行背景**：目的地、天数、当前路线或与研究有关的上下文。
-2. **研究目标**：为什么需要这次 Research。
-3. **用户约束**：预算、旅行者、节奏、交通偏好等与本任务有关的信息。
-4. **具体问题**：需要核验或比较哪些事项。
-5. **返回要求**：关键事实、比较结果、推荐倾向、冲突 / 不确定性、重要来源。
-6. **职责边界**：只返回 Research Findings，不生成最终旅行计划。
-
-不要委派模糊任务，例如：
-
-> 研究一下第二天。
-
-应该写成一份完整、可独立执行的 Research Brief。
-
-### Research Findings
-
-期望 general-purpose 返回简洁、可直接用于 Main 综合判断的结果，优先包含：
-
-- 关键事实
-- 方案比较
-- 推荐倾向及理由
-- 信息冲突或不确定性
-- 重要来源 / URL（Tool 能提供时）
-
-Main Agent 负责判断这些 Findings 如何影响路线、时间和预算，并完成 Final Plan Synthesis。
+天气只在与实际旅行日期相关时 Research。
+没有实际旅行日期时，不应把“今天的天气”当作未来旅行计划依据。
 
 ## 4. 设计可执行路线
 
@@ -134,28 +116,50 @@ Main Agent 负责判断这些 Findings 如何影响路线、时间和预算，�
 - 根据旅行者情况调整强度
 - 保留必要缓冲
 
-亲子、老人或轻松旅行应降低强度并增加缓冲。高强度旅行可以提高活动密度，但仍必须保证实际可执行。
+亲子、老人或轻松旅行应降低强度并增加缓冲。
+高强度旅行可以提高活动密度，但仍必须保证实际可执行。
 
-相关情况下检查开放 / 关闭时间、最晚入场时间、固定闭馆日、预约时间、天气、抵达 / 返程时间、飞机 / 高铁时间、城际交通和排队时间。
+相关情况下根据 Research Findings 检查：
+
+- 开放 / 关闭时间
+- 最晚入场时间
+- 固定闭馆日
+- 预约时间
+- 天气
+- 抵达 / 返程时间
+- 飞机 / 高铁时间
+- 城际交通
+- 排队时间
 
 不得生成明显存在时间冲突的行程。
 
 ## 5. 让预算参与规划
 
-根据预算调整住宿、城际交通、当地交通、景点与付费体验、餐饮和其他消费。
+根据预算调整：
 
-没有可靠价格时使用区间。不要编造未经验证的精确金额。若方案可能明显超预算，应主动调整或指出主要超支来源。
+- 住宿
+- 城际交通
+- 当地交通
+- 景点与付费体验
+- 餐饮
+- 其他消费
+
+没有可靠价格时使用区间。
+不要编造未经验证的精确金额。
+若方案可能明显超预算，应主动调整或指出主要超支来源。
 
 ## 6. 创建完整旅行计划
 
 当用户明确要求生成完整旅行计划时：
 
-1. 完成必要的需求理解和 Research。
-2. 仅在复杂、高噪声独立研究确有价值时委派 `general-purpose`。
-3. 由 Main Agent 综合 conversation、Tool 结果和 Research Findings，设计整体路线和每日节奏。
-4. 在最终输出前读取 `references/markdown-contract.md`。
-5. 严格按照其中的固定标题和 Markdown Contract 输出。
-6. 返回完整旅行计划，而不是 Research 摘要或景点清单。
+1. Main 理解需求，对非阻塞信息采用合理假设。
+2. 读取本 Skill。
+3. 必须委派 Travel Researcher。
+4. 等待 Research Findings 返回。
+5. Main 根据 conversation、用户约束和 Findings 完成最终路线与每日节奏。
+6. Research 完成后读取 `references/markdown-contract.md`。
+7. 严格按照 Markdown Contract 输出。
+8. 返回完整旅行计划，而不是 Research 摘要或景点清单。
 
 普通旅行问答不要读取 Markdown Contract。
 
@@ -166,12 +170,11 @@ Main Agent 负责判断这些 Findings 如何影响路线、时间和预算，�
 1. 将 conversation 中最近一次完整旅行计划视为当前版本。
 2. 理解用户真正想改变的内容。
 3. 保留未被修改的约束、偏好和有效安排。
-4. 只重新 Research 受影响的信息。
-5. 如果受影响部分本身是复杂、高噪声研究任务，可按第 3 节委派 `general-purpose`。
-6. 检查修改产生的时间、路线、交通和预算连锁影响。
-7. 必要时重新平衡其他日期。
-8. 读取 `references/markdown-contract.md`。
-9. 返回新的完整 Markdown 旅行计划。
+4. 必须委派 Travel Researcher Research 受影响的信息。
+5. Main 根据 Findings 检查时间、路线、交通和预算连锁影响。
+6. 必要时重新平衡其他日期。
+7. Research 完成后读取 `references/markdown-contract.md`。
+8. 返回新的完整 Markdown 旅行计划。
 
 不得只返回 Patch、Diff、修改项列表或单独修改后的某一天。
 
@@ -182,30 +185,32 @@ Main Agent 负责判断这些 Findings 如何影响路线、时间和预算，�
 输出完整计划前确认：
 
 - 最新用户要求已体现
+- Runtime 时间已正确用于相对日期和当前信息判断
+- Research Findings 已返回
 - 天数和 Day 数量一致
 - 路线顺序合理
 - 没有明显折返
 - 主要交通时间现实
 - 抵达 / 返程时间合理
 - 开放、预约、天气等约束已考虑
+- 当前事实没有被旧年份资料错误替代
+- 没有把未经核验的猜测通过搜索“自证”
 - 预算没有明显违背用户要求
 - 没有伪造未经验证的精确事实
 - 用户明确要求没有遗漏
 - 修改时保留了未涉及内容
-- general-purpose 的 Findings 已由 Main 自己判断，而不是直接当最终计划输出
 - 最终结果是一份完整旅行计划
 
 不要创建额外 Validator Agent 或 Validator Workflow。
 
 ## 核心原则
 
-- 模糊、概率性的旅行判断交给模型。
-- 当前、可变化的事实交给 Tool。
-- 不需要 Research 时不要强制 Research。
-- 普通 Research 直接使用 Tool。
-- 只有复杂、高噪声独立 Research 才选择性委派 `general-purpose`。
-- SubAgent 用于 Context Isolation，不是最终规划者。
-- Main Agent 是唯一最终旅行计划语义负责人。
+- 模糊、概率性的旅行判断交给 Main。
+- 当前日期和星期由 Runtime 动态提供。
+- 外部旅行事实由 Travel Researcher Research。
+- Research 中间上下文与 Main 最终规划上下文隔离。
+- Travel Researcher 只返回 Findings。
+- Main 是唯一最终旅行计划语义负责人。
 - 完整计划必须遵守 Markdown Contract。
 - 不得为了内容丰富而编造事实。
 - 优先保证旅行真实可执行，而不是增加景点数量。
