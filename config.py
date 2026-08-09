@@ -1,18 +1,12 @@
-"""全局配置：从仓库根目录 .env 读取，lru_cache 做单例。
-
-.env 位置：backend_v4/config.py → 上溯 1 级 = 仓库根（与 backend/app 共用同一个 .env）。
-"""
+"""行伴 v6 全局配置：从项目根目录 .env 读取，lru_cache 做单例。"""
 from functools import lru_cache
-from pathlib import Path
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# backend_v4/config.py → parents[1] = 仓库根
 ENV_FILE = ".env"
 
 
 class Settings(BaseSettings):
-    APP_NAME: str = "travel-agent-v4"
+    APP_NAME: str = "travel-agent-v6"
     APP_DEBUG: bool = True
 
     # ---- 模型 ----

@@ -1,5 +1,14 @@
-"""v4 底层 API 工具实现（天气 / 搜索 / 路线）。
+"""行伴旅行工具。
 
-从 backend/app/agents/tools/ 复制并改为独立依赖（config），
-使 backend_v4 成为自包含工程，不依赖 backend/app。
+- search / weather / route：v6 原有底层 API 实现。
+- agent_tools：面向 LLM 的稳定 Tool schema 与异常边界。
 """
+
+from tools.agent_tools import TRAVEL_TOOLS, get_weather, search_maps, search_travel_info
+
+__all__ = [
+    "TRAVEL_TOOLS",
+    "get_weather",
+    "search_maps",
+    "search_travel_info",
+]

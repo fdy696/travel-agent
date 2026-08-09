@@ -1863,8 +1863,8 @@ wheels = [
 ]
 
 [[package]]
-name = "travel-agent-v4"
-version = "0.1.0"
+name = "travel-agent-v6"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "deepagents" },
