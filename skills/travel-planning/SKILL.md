@@ -48,6 +48,8 @@ Research 只用于提高正确性、时效性和路线可执行性，不要为�
 - 比较自驾与公共交通
 - 关键交通耗时
 
+不要仅凭地名印象估算实际交通时间。
+
 ### 时效信息
 
 以下信息可能变化时使用 `search_travel_info`：
@@ -62,24 +64,63 @@ Research 只用于提高正确性、时效性和路线可执行性，不要为�
 - 节假日安排
 - 最近交通政策
 
+只有信息会影响计划或用户决策时才查询，不要因为出现景点名称就自动搜索。
+
 Tool 查询失败时，不编造查询结果、精确时间或精确价格；保留不确定性，并在必要时提醒用户出发前再次确认。
 
-## 3. 必要时委派 Travel Researcher
+## 3. 必要时委派 general-purpose
 
-如果运行环境提供 Travel Researcher，只在复杂、高噪声研究任务中委派，例如：
+不创建业务专用 Travel Researcher。普通旅行 Research 由 Main Agent 直接使用 Tool 完成。
+
+只有当一个相对独立的研究子任务需要多步骤搜索、比较或核验，并且大量中间 Tool Result 会明显污染 Main Agent 当前上下文时，才使用 Deep Agents 的 `task` 工具委派给 `general-purpose`。
+
+适合委派：
 
 - 多城市复杂旅行
 - 大量跨来源事实核验
-- 多种交通方案比较
+- 多种交通方案 / Pass 系统比较
 - 大量预约规则研究
-- 多套路线系统比较
-- Research 中间结果过多，可能污染 Main Agent 上下文
+- 多套路线候选方案比较
+- 预计需要连续多次 Search / Maps / Weather 调用的独立研究任务
 
-普通旅行规划由 Main Agent 直接使用 Tool 完成。
+不适合委派：
 
-Travel Researcher 只负责搜索、核验、比较和压缩研究结果；不负责与用户沟通、决定最终路线、修改最终计划或输出最终旅行计划。
+- 单次事实查询
+- 一两次 Tool Call 可以解决的问题
+- 普通三五日行程中很轻量的 Research
+- 最终路线选择
+- 最终完整旅行计划生成
 
-最终综合始终由 Main Agent 完成。
+### Delegation Brief
+
+调用 `task` 时使用 `subagent_type="general-purpose"`。
+
+`description` 必须提供足够上下文，使 subagent 不依赖 Main conversation 也能独立完成任务。至少包含：
+
+1. **旅行背景**：目的地、天数、当前路线或与研究有关的上下文。
+2. **研究目标**：为什么需要这次 Research。
+3. **用户约束**：预算、旅行者、节奏、交通偏好等与本任务有关的信息。
+4. **具体问题**：需要核验或比较哪些事项。
+5. **返回要求**：关键事实、比较结果、推荐倾向、冲突 / 不确定性、重要来源。
+6. **职责边界**：只返回 Research Findings，不生成最终旅行计划。
+
+不要委派模糊任务，例如：
+
+> 研究一下第二天。
+
+应该写成一份完整、可独立执行的 Research Brief。
+
+### Research Findings
+
+期望 general-purpose 返回简洁、可直接用于 Main 综合判断的结果，优先包含：
+
+- 关键事实
+- 方案比较
+- 推荐倾向及理由
+- 信息冲突或不确定性
+- 重要来源 / URL（Tool 能提供时）
+
+Main Agent 负责判断这些 Findings 如何影响路线、时间和预算，并完成 Final Plan Synthesis。
 
 ## 4. 设计可执行路线
 
@@ -97,6 +138,8 @@ Travel Researcher 只负责搜索、核验、比较和压缩研究结果；不�
 
 相关情况下检查开放 / 关闭时间、最晚入场时间、固定闭馆日、预约时间、天气、抵达 / 返程时间、飞机 / 高铁时间、城际交通和排队时间。
 
+不得生成明显存在时间冲突的行程。
+
 ## 5. 让预算参与规划
 
 根据预算调整住宿、城际交通、当地交通、景点与付费体验、餐饮和其他消费。
@@ -108,10 +151,11 @@ Travel Researcher 只负责搜索、核验、比较和压缩研究结果；不�
 当用户明确要求生成完整旅行计划时：
 
 1. 完成必要的需求理解和 Research。
-2. 设计整体路线和每日节奏。
-3. 在最终输出前读取 `references/markdown-contract.md`。
-4. 严格按照其中的固定标题和 Markdown Contract 输出。
-5. 返回完整旅行计划，而不是 Research 摘要或景点清单。
+2. 仅在复杂、高噪声独立研究确有价值时委派 `general-purpose`。
+3. 由 Main Agent 综合 conversation、Tool 结果和 Research Findings，设计整体路线和每日节奏。
+4. 在最终输出前读取 `references/markdown-contract.md`。
+5. 严格按照其中的固定标题和 Markdown Contract 输出。
+6. 返回完整旅行计划，而不是 Research 摘要或景点清单。
 
 普通旅行问答不要读取 Markdown Contract。
 
@@ -123,10 +167,11 @@ Travel Researcher 只负责搜索、核验、比较和压缩研究结果；不�
 2. 理解用户真正想改变的内容。
 3. 保留未被修改的约束、偏好和有效安排。
 4. 只重新 Research 受影响的信息。
-5. 检查修改产生的时间、路线、交通和预算连锁影响。
-6. 必要时重新平衡其他日期。
-7. 读取 `references/markdown-contract.md`。
-8. 返回新的完整 Markdown 旅行计划。
+5. 如果受影响部分本身是复杂、高噪声研究任务，可按第 3 节委派 `general-purpose`。
+6. 检查修改产生的时间、路线、交通和预算连锁影响。
+7. 必要时重新平衡其他日期。
+8. 读取 `references/markdown-contract.md`。
+9. 返回新的完整 Markdown 旅行计划。
 
 不得只返回 Patch、Diff、修改项列表或单独修改后的某一天。
 
@@ -147,6 +192,7 @@ Travel Researcher 只负责搜索、核验、比较和压缩研究结果；不�
 - 没有伪造未经验证的精确事实
 - 用户明确要求没有遗漏
 - 修改时保留了未涉及内容
+- general-purpose 的 Findings 已由 Main 自己判断，而不是直接当最终计划输出
 - 最终结果是一份完整旅行计划
 
 不要创建额外 Validator Agent 或 Validator Workflow。
@@ -156,7 +202,9 @@ Travel Researcher 只负责搜索、核验、比较和压缩研究结果；不�
 - 模糊、概率性的旅行判断交给模型。
 - 当前、可变化的事实交给 Tool。
 - 不需要 Research 时不要强制 Research。
-- 不需要 SubAgent 时不要强制委派。
+- 普通 Research 直接使用 Tool。
+- 只有复杂、高噪声独立 Research 才选择性委派 `general-purpose`。
+- SubAgent 用于 Context Isolation，不是最终规划者。
 - Main Agent 是唯一最终旅行计划语义负责人。
 - 完整计划必须遵守 Markdown Contract。
 - 不得为了内容丰富而编造事实。
