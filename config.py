@@ -1,19 +1,27 @@
 """行伴 v6 全局配置：从项目根目录 .env 读取，lru_cache 做单例。"""
+from __future__ import annotations
+
 from functools import lru_cache
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 ENV_FILE = ".env"
+AppEnv = Literal["development", "test", "production"]
 
 
 class Settings(BaseSettings):
     APP_NAME: str = "travel-agent-v6"
     APP_DEBUG: bool = True
+    APP_ENV: AppEnv = "development"
 
     # ---- 模型 ----
     DEEPSEEK_API_KEY: str = ""
     CHAT_MODEL: str = "deepseek-v4-flash"
 
-    # ---- 联网搜索（Tavily）----
+    # ---- 生产联网搜索（Tavily）----
+    # development 不会调用 Tavily；production 才以 Tavily 为主搜索。
     TAVILY_API_KEY: str = ""
 
     # ---- 天气（和风天气）----

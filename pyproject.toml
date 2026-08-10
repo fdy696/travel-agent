@@ -1,11 +1,12 @@
 [project]
 name = "travel-agent-v6"
 version = "0.2.0"
-description = "行伴 Travel Agent v6 — Main Agent + Travel Skill + Travel Tools"
+description = "行伴 Travel Agent v6 — Main Agent + Travel Skill + Travel Researcher + Travel Tools"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic-settings>=2.0",
     "tavily>=0.5",
+    "ddgs>=9.14.4",
     "httpx>=0.27",
     "langchain>=1.0",
     "langchain-deepseek>=1.0",
@@ -28,6 +29,8 @@ only-include = [
     "agent.py",
     "cli.py",
     "config.py",
+    "middleware",
+    "subagents",
     "tools",
     "skills",
 ]

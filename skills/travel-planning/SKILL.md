@@ -27,9 +27,13 @@ Main Agent 始终负责最终判断、最终规划和最终回答。
 
 不要把旅行规划变成问卷。
 
-如果已经知道目的地和可用日期 / 天数，通常直接开始规划。
-对不会明显改变整体方案的信息采用合理假设。
-只有缺失信息会显著改变整个行程、且无法安全假设时，才进行简洁追问。
+在开始 Travel Researcher Research 前，先确认是否缺少会直接改变整体方案的关键条件。
+例如进出城市、实际旅行日期 / 时间范围、是否跨城等核心信息如果当前请求存在歧义，应先简洁追问。
+
+关键条件未明确时，不要先读取本 Skill、不要委派 Research，也不要猜测核心路线。
+
+对不会明显改变整体方案的非关键偏好，可以采用合理假设。
+会显著影响预算的核心交通方案（如是否购买 JR Pass 等 Pass / 周游券）不要预先假设，应等 Research 比价后由 Main 决定。
 
 ## 2. Travel Researcher
 
@@ -49,7 +53,7 @@ Main 必须调用：
 
 固定链路：
 
-`Main → travel-planning Skill → Travel Researcher → Research Findings → Markdown Contract → Main Final Synthesis`
+`Main → 必要需求澄清 → travel-planning Skill → Travel Researcher → Research Findings → Markdown Contract → Main Final Synthesis`
 
 规划模式下：
 
@@ -75,6 +79,7 @@ Main 的委派描述必须自包含，至少包括：
 7. Anti-confirmation 要求
 8. Research Findings 返回要求
 9. “只做 Research、不生成最终计划”的职责边界
+10. 币种要求：Research 以当地货币核实事实价格，Findings 中每个价格标注币种
 
 普通旅行问答不是完整旅行规划，可由 Main 按需直接调用 Tool。
 
@@ -148,18 +153,24 @@ Research 必须：
 不要编造未经验证的精确金额。
 若方案可能明显超预算，应主动调整或指出主要超支来源。
 
+所有金额必须明确币种，不得仅用 "¥" 表示（对中文用户易误读为人民币）。
+当地货币是事实价格；人民币等换算金额只能由 Main 基于汇率换算，不得与事实价混写。
+币种表达规则见 Markdown Contract「币种规范」。
+
 ## 6. 创建完整旅行计划
 
 当用户明确要求生成完整旅行计划时：
 
-1. Main 理解需求，对非阻塞信息采用合理假设。
-2. 读取本 Skill。
-3. 必须委派 Travel Researcher。
-4. 等待 Research Findings 返回。
-5. Main 根据 conversation、用户约束和 Findings 完成最终路线与每日节奏。
-6. Research 完成后读取 `references/markdown-contract.md`。
-7. 严格按照 Markdown Contract 输出。
-8. 返回完整旅行计划，而不是 Research 摘要或景点清单。
+1. Main 理解需求。
+2. 如果缺少会改变整体方案的关键条件，先向用户做简洁澄清；关键条件明确前不要开始 Research。
+3. 对不影响整体方案的非关键偏好采用合理假设。
+4. 读取本 Skill。
+5. 必须委派 Travel Researcher。
+6. 等待 Research Findings 返回。
+7. Main 根据 conversation、用户约束和 Findings 完成最终路线与每日节奏。
+8. Research 完成后读取 `references/markdown-contract.md`。
+9. 严格按照 Markdown Contract 输出。
+10. 返回完整旅行计划，而不是 Research 摘要或景点清单。
 
 普通旅行问答不要读取 Markdown Contract。
 
@@ -196,6 +207,7 @@ Research 必须：
 - 当前事实没有被旧年份资料错误替代
 - 没有把未经核验的猜测通过搜索“自证”
 - 预算没有明显违背用户要求
+- 预算模块金额币种明确，未被裸 "¥" 误读为人民币
 - 没有伪造未经验证的精确事实
 - 用户明确要求没有遗漏
 - 修改时保留了未涉及内容

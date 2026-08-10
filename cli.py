@@ -18,6 +18,8 @@ from rich.markdown import Markdown
 from rich.prompt import Prompt
 
 from agent import build_agent
+from config import get_settings
+from tools.search import current_search_provider_name
 
 
 for _stream in (sys.stdout, sys.stderr):
@@ -256,7 +258,7 @@ async def _ask_debug(
     _trace_line(started_at, "MAIN", "Start", _truncate(question, 180))
 
     try:
-        with log_path.open("a", encoding="utf-8") as log_file:
+        with log_path.open("a", encoding="utf-8", errors="backslashreplace") as log_file:
             async for part in agent.astream(
                 {"messages": [{"role": "user", "content": question}]},
                 config=_config(thread_id),
@@ -333,6 +335,11 @@ async def _repl(
 ) -> None:
     console.print("[bold]行伴 Travel Agent[/bold]")
     console.print(f"会话：{thread_id}", markup=False)
+    settings = get_settings()
+    console.print(
+        f"环境：{settings.APP_ENV}｜搜索策略：{current_search_provider_name()}",
+        markup=False,
+    )
     console.print(
         "开发调试默认开启：终端显示简洁执行轨迹，完整原始事件写入日志。"
         if debug

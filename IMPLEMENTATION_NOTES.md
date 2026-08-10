@@ -1,44 +1,52 @@
 # Implementation Notes
 
-## Scope implemented
+## Current architecture
 
-This delivery implements the first three development stages on top of `travel_agent_v6`:
+- Main Agent: user intent, necessary clarification, final route/plan decisions, final answer.
+- `travel-planning` Skill: planning method + Markdown output contract.
+- `travel-researcher`: dedicated multi-topic Research SubAgent with isolated tool context.
+- Travel Tools: search / weather / maps.
+- Runtime clock middleware: current date, weekday, time, timezone, year on every model call.
+- CLI: concise trace in terminal; full raw stream events in `logs/`.
 
-- Phase 0: clean v6 baseline / remove stale v4 metadata.
-- Phase 1: Main Agent + `travel-planning` Skill; full Markdown planning and same-thread modifications.
-- Phase 2: Agent-facing wrappers for existing Search / Weather / Maps APIs.
+## Planning flow
 
-## Modification semantics
+```text
+Main
+→ necessary clarification
+→ travel-planning Skill
+→ travel-researcher
+→ Research Findings
+→ Markdown Contract
+→ Main Final Synthesis
+```
 
-No Plan CRUD is introduced. The CLI creates one `InMemorySaver` and one agent instance. Each turn submits only the new user message with the same `thread_id`; LangGraph restores the prior conversation state. The Main Agent uses the latest complete Markdown plan in that state, applies the user's change, and returns a new complete Markdown plan.
+If route-defining conditions are still ambiguous, Main asks first and does not start Research.
 
-## Validation performed here
+## Search environments
 
-- `python -m compileall` passes for all Python files.
-- `pyproject.toml` parses with `tomllib`.
-- Skill frontmatter and modification contract were statically checked.
+`APP_ENV` is the only switch:
 
-The execution environment used to prepare this patch does not have `deepagents`, `langgraph`, or `langchain-deepseek` installed, so a real model/tool end-to-end call could not be executed here.
+```text
+development → DuckDuckGo only
+test        → FakeSearch only
+production  → Tavily → DuckDuckGo fallback
+```
 
-## Local validation
+This guarantees local development does not consume Tavily quota even when `TAVILY_API_KEY`
+exists in the machine environment.
+
+Switch by restarting the process with a different value:
 
 ```bash
-uv sync
-cp .env.example .env
-# fill API keys
-uv run python cli.py
+APP_ENV=development uv run python cli.py
+APP_ENV=test uv run python cli.py
+APP_ENV=production uv run python cli.py
 ```
 
-Suggested smoke test:
+or set the value in `.env`.
 
-```text
-北京三日游，情侣，预算3000，喜欢美食和人文
-```
+## Dependency / lockfile note
 
-Then in the same CLI process:
-
-```text
-第二天不要原来的安排了，换成环球影城，预算尽量别增加
-```
-
-Expected behavior: the second response is a complete revised Markdown itinerary, not a patch or a short confirmation.
+`ddgs>=9.14.4` was added to `pyproject.toml`.
+Run `uv sync` after applying this patch; `uv` will refresh `uv.lock` locally.

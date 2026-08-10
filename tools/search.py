@@ -1,32 +1,51 @@
-"""联网搜索工具（Tavily）。用于攻略 / 景点 / 美食 / 交通等实时信息。"""
-from typing import Literal
+"""联网搜索统一入口。
 
-from tavily import TavilyClient
+环境策略：
+- development -> DuckDuckGo（免费，不调用 Tavily）
+- test        -> FakeSearch（完全离线）
+- production  -> Tavily，失败/无结果时 DuckDuckGo fallback
 
-from config import require_key
+Travel Agent 只看到 search_web / search_travel_info，不感知供应商。
+"""
+from __future__ import annotations
 
-SearchTopic = Literal["general", "news", "finance"]
-SearchDepth = Literal["basic", "advanced"]
+from functools import lru_cache
+from typing import cast
 
-# 旅游内容站白名单：攻略 / 门票 / 住宿等垂直信息源，优先在这里搜（无结果自动回退全网）
-TRAVEL_SITES = [
-    "ctrip.com",       # 携程
-    "qunar.com",       # 去哪儿
-    "mafengwo.cn",     # 马蜂窝
-    "qyer.com",        # 穷游
-    "dianping.com",    # 大众点评
-    "xiaohongshu.com", # 小红书
-]
-
-_client: TavilyClient | None = None
+from config import get_settings
+from tools.search_providers.base import SearchDepth, SearchProvider, SearchTopic
 
 
-def _get_client() -> TavilyClient:
-    """懒加载单例客户端（避免每次调用重建）。"""
-    global _client
-    if _client is None:
-        _client = TavilyClient(api_key=require_key("TAVILY_API_KEY"))
-    return _client
+@lru_cache
+def get_search_provider() -> SearchProvider:
+    """根据 APP_ENV 构建当前进程唯一的搜索策略。"""
+    app_env = get_settings().APP_ENV
+
+    if app_env == "development":
+        from tools.search_providers.duckduckgo import DuckDuckGoSearchProvider
+
+        return cast(SearchProvider, DuckDuckGoSearchProvider())
+
+    if app_env == "test":
+        from tools.search_providers.fake import FakeSearchProvider
+
+        return cast(SearchProvider, FakeSearchProvider())
+
+    if app_env == "production":
+        from tools.search_providers.duckduckgo import DuckDuckGoSearchProvider
+        from tools.search_providers.fallback import FallbackSearchProvider
+        from tools.search_providers.tavily import TavilySearchProvider
+
+        return cast(
+            SearchProvider,
+            FallbackSearchProvider(
+                primary=TavilySearchProvider(),
+                fallback=DuckDuckGoSearchProvider(),
+            ),
+        )
+
+    # Settings 已用 Literal 校验；这里保留防御式分支。
+    raise RuntimeError(f"不支持的 APP_ENV：{app_env}")
 
 
 def search_web(
@@ -36,41 +55,21 @@ def search_web(
     search_depth: SearchDepth = "advanced",
     include_domains: list[str] | None = None,
 ) -> str:
-    """联网搜索，返回格式化结果文本（标题 + URL + 摘要）。
+    """执行环境自适应联网搜索，返回标题 + URL + 摘要。"""
+    safe_max_results = max(1, min(max_results, 8))
+    result = get_search_provider().search(
+        query=query,
+        max_results=safe_max_results,
+        topic=topic,
+        search_depth=search_depth,
+        include_domains=include_domains,
+    )
+    return result or "未找到相关搜索结果。"
 
-    默认在旅游站白名单（TRAVEL_SITES）内搜索，白名单无结果时自动回退全网。
 
-    Args:
-        query: 搜索词，如 "北京 3天 亲子游 攻略"
-        max_results: 返回条数
-        topic: general / news / finance
-        search_depth: basic（快）/ advanced（深）
-        include_domains: 自定义域名白名单；None 时用默认旅游站白名单
-    """
-    client = _get_client()
-
-    def _do_search(domains: list[str] | None) -> list[dict]:
-        resp = client.search(
-            query=query,
-            max_results=max_results,
-            topic=topic,
-            search_depth=search_depth,
-            include_domains=domains,
-        )
-        return resp.get("results") or []
-
-    results = _do_search(include_domains if include_domains is not None else TRAVEL_SITES)
-    if not results:
-        results = _do_search(None)  # 白名单无结果 → 全网回退
-
-    if not results:
-        return "未找到相关搜索结果。"
-
-    lines = []
-    for i, r in enumerate(results, 1):
-        lines.append(
-            f"{i}. {r.get('title', '')}\n"
-            f"   URL: {r.get('url', '')}\n"
-            f"   {r.get('content', '')}"
-        )
-    return "\n\n".join(lines)
+def current_search_provider_name() -> str:
+    """供 CLI / diagnostics 显示当前实际搜索策略，不暴露给模型。"""
+    provider = get_search_provider()
+    if get_settings().APP_ENV == "production":
+        return "tavily → duckduckgo fallback"
+    return provider.name

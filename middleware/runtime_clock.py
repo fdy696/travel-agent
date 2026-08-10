@@ -10,7 +10,6 @@ from typing import Any
 from langchain.agents.middleware import AgentMiddleware, ModelRequest
 from langchain_core.messages import SystemMessage
 
-
 _WEEKDAY_NAMES = (
     "星期一",
     "星期二",
