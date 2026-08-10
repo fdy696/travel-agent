@@ -1,8 +1,6 @@
-# Selective Delegation Eval Cases
+# Travel Agent v6 Eval Cases
 
-这些 Case 用于人工 / LangSmith trajectory eval，重点验证 Main 是否正确选择：直接回答、直接 Tool、Travel Skill、或 `task -> general-purpose`。
-
-CLI 默认 debug，可以直接观察实际 trajectory。
+用于 CLI 人工 trajectory eval，重点验证需求澄清、Research 隔离、预算计算、币种和模型 / 环境策略。
 
 ## Case 1：闲聊
 
@@ -10,115 +8,86 @@ CLI 默认 debug，可以直接观察实际 trajectory。
 你好
 ```
 
-期望：
+期望：不读 Skill、不调用 Researcher、不调用旅行 Tool，直接回答。
 
-- 不读取 travel-planning Skill
-- 不调用 Travel Tool
-- 不调用 task
-- 直接自然回答
-
-## Case 2：简单实时事实
+## Case 2：普通旅行事实
 
 ```text
 东京明天天气怎么样？
 ```
 
-期望：
+期望：Main 可直接调用 `get_weather`；不读完整 Planning Contract；不委派 Researcher。
 
-- `get_weather`
-- 不读取完整 Travel Planning Skill
-- 不调用 task
-
-## Case 3：轻量推荐
+## Case 3：信息不足的完整规划
 
 ```text
-推荐几个京都值得去的寺庙
+帮我规划日本5天游，东京进
 ```
 
-期望：
+期望：Main 先澄清会改变整体方案的关键条件；关键条件明确前不委派 Researcher。
 
-- Main 直接回答
-- 必要时少量 `search_travel_info`
-- 不生成完整多日 Plan
-- 不调用 task
-
-## Case 4：普通完整规划
+## Case 4：完整跨城规划
 
 ```text
-帮我规划洛阳三日游，从北京出发，情侣，预算 3000 元，喜欢历史文化和美食。
+2026年8月20日东京进，8月24日大阪出，2人，舒适型，其他你安排。
 ```
 
-期望：
-
-- 读取 `travel-planning`
-- 按需直接调用 search / maps / weather
-- 通常不需要 task
-- 最终遵守 Markdown Contract
-
-## Case 5：复杂 Research，应考虑委派
+期望轨迹：
 
 ```text
-帮我规划日本 15 天，东京进大阪出。想去东京、箱根或河口湖（二选一）、京都、大阪。请比较箱根和河口湖，研究主要跨城交通方案、多个交通 Pass 是否值得、环球影城和热门景点预约规则，再给完整行程。我们不自驾，偏轻松旅行。
+Main
+→ Skill: travel-planning
+→ task(subagent_type="travel-researcher")
+→ Research Findings
+→ calculate_budget（存在多项费用时）
+→ convert_currency（需要人民币辅助参考时）
+→ Markdown Contract
+→ Final Plan
 ```
 
-期望：
+Researcher 内只出现 search / maps / weather，不出现 `calculate_budget` / `convert_currency`。
 
-- 读取 `travel-planning`
-- Main 判断存在相对独立、高噪声、多步骤 Research
-- 出现 `task` Tool Call
-- `subagent_type = general-purpose`
-- description 是完整 Research Brief，不是短句
-- SubAgent 内部可调用 search / maps / weather
-- SubAgent 返回 Findings
-- Main 做最终 Plan Synthesis
+## Case 5：JR Pass 不得提前假设
 
-## Case 6：已有计划局部修改
+同 Case 4。
 
-前置：先完成一份东京五日游。
+期望：Main 在 Research 前不得把“购买 JR Pass”写成默认交通结论。Research Brief 应要求比较单程购票 / Pass 等合理方案，Research 后再决定。
 
-然后输入：
+## Case 6：预算一致性
 
-```text
-把第二天换成迪士尼，其他要求尽量保持不变。
-```
+日本路线包含：东京→京都、京都→大阪、住宿、餐饮、门票。
 
 期望：
 
-- 读取当前 conversation 最近完整 Plan
-- 只 Research 受影响内容
-- 简单修改不应无理由调用 task
-- 返回新的完整 Markdown Plan，而不是 diff
+- 最终预算只汇总最终采用方案
+- 不把“京都→大阪新干线备选价”和“JR 新快速最终价”同时混进总额
+- 总额 / 人均以 `calculate_budget` 结果为准
 
-## Case 7：复杂修改，可委派受影响 Research
-
-前置：已有日本多城市计划。
-
-然后输入：
-
-```text
-我不买 JR Pass 了，重新比较东京到箱根、箱根到京都、京都到大阪的交通组合和费用影响，再调整整份行程。
-```
+## Case 7：币种
 
 期望：
 
-- 只研究受影响交通部分
-- 如果需要多方案、多来源比较，可调用 `task -> general-purpose`
-- Main 综合 Findings 后重新平衡路线和预算
-- 返回新的完整 Plan
+- 不出现裸 `¥14,000`
+- 使用 `14,000 日元` 或 `JPY 14,000`
+- 如出现人民币参考，来自 `convert_currency`
+- 汇率服务失败时只保留当地货币
 
-## 观察重点
+## Case 8：模型切换
 
-开发 CLI 中重点确认：
-
-```text
-MAIN
-→ Tool Call / read skill
-→ task(subagent_type="general-purpose")（仅复杂 case）
-→ SUBAGENT namespace
-→ SubAgent Tool Calls / Results
-→ task ToolMessage Research Findings
-→ MAIN final model call
-→ Final Answer
+```env
+LLM_PROVIDER=deepseek
 ```
 
-若普通简单 Case 频繁调用 task，说明 delegation prompt 过度；若复杂 Case 长期完全不委派，则需要调整 Main Prompt 中的复杂 Research 描述，而不是增加 Python Router。
+和：
+
+```env
+LLM_PROVIDER=ollama
+```
+
+期望：无需修改 Agent / Skill / Tool 代码；CLI 启动栏显示实际 provider/model。
+
+## Case 9：搜索环境
+
+- development：DDGS，不请求 Tavily
+- test：FakeSearch，不联网
+- production：Tavily primary，失败后 DDGS fallback

@@ -4,11 +4,13 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import PositiveInt
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 ENV_FILE = ".env"
 AppEnv = Literal["development", "test", "production"]
+ModelProviderName = Literal["deepseek", "ollama"]
 
 
 class Settings(BaseSettings):
@@ -16,9 +18,23 @@ class Settings(BaseSettings):
     APP_DEBUG: bool = True
     APP_ENV: AppEnv = "development"
 
+    # ---- Agent 执行保护 ----
+    # LangGraph recursion_limit：单次执行允许的最大 super-steps。
+    # 这是异常循环的最后保险，不替代模型自身的正常停止判断。
+    AGENT_RECURSION_LIMIT: PositiveInt = 80
+
     # ---- 模型 ----
+    # 与 APP_ENV 独立：开发环境也可以使用 DeepSeek，生产环境也可以切 Ollama。
+    LLM_PROVIDER: ModelProviderName = "deepseek"
+
     DEEPSEEK_API_KEY: str = ""
-    CHAT_MODEL: str = "deepseek-v4-flash"
+    CHAT_MODEL: str = "deepseek-v4-flash"  # DeepSeek 模型名，保留旧配置兼容
+
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "qwen3:8b"
+
+    # ---- 免费参考汇率（Frankfurter）----
+    FX_BASE_URL: str = "https://api.frankfurter.dev/v2"
 
     # ---- 生产联网搜索（Tavily）----
     # development 不会调用 Tavily；production 才以 Tavily 为主搜索。

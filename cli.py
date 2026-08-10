@@ -13,12 +13,15 @@ from typing import Any
 import typer
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.errors import GraphRecursionError
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.prompt import Prompt
 
 from agent import build_agent
 from config import get_settings
+from models.factory import current_model_provider_name
+from tools.currency import current_fx_provider_name
 from tools.search import current_search_provider_name
 
 
@@ -35,7 +38,12 @@ QUIT_WORDS = ("/quit", "/exit", "/q", "退出")
 
 
 def _config(thread_id: str) -> dict[str, Any]:
-    return {"configurable": {"thread_id": thread_id}}
+    settings = get_settings()
+    return {
+        "configurable": {"thread_id": thread_id},
+        # 必须是 config 顶层键；LangGraph 用它限制单次执行 super-steps。
+        "recursion_limit": settings.AGENT_RECURSION_LIMIT,
+    }
 
 
 def _content_to_text(content: Any) -> str:
@@ -291,8 +299,20 @@ async def _ask_debug(
             log_file.write("\n")
             log_file.flush()
 
+    except GraphRecursionError:
+        limit = get_settings().AGENT_RECURSION_LIMIT
+        message = (
+            f"本轮 Agent 执行达到安全步数上限（{limit}），已自动停止。"
+            "这通常表示模型或工具调用出现了异常循环；请查看本轮详细日志定位最后几步。"
+        )
+        _trace_line(started_at, "MAIN", "Guard stop", message)
+        with log_path.open("a", encoding="utf-8", errors="backslashreplace") as log_file:
+            log_file.write("\n===== EXECUTION GUARD =====\n")
+            log_file.write(message)
+            log_file.write("\n")
+        return message
     except Exception:
-        # 完整 traceback 由调用层打印；已有 raw events 已经持续 flush 到日志。
+        # 其他异常仍保留原行为，完整 traceback 由调用层打印。
         raise
 
     _trace_line(started_at, "MAIN", "Done", f"{time.perf_counter() - started_at:.1f}s")
@@ -316,10 +336,17 @@ async def ask(
             log_dir=log_dir,
         )
 
-    result = await agent.ainvoke(
-        {"messages": [{"role": "user", "content": question}]},
-        config=_config(thread_id),
-    )
+    try:
+        result = await agent.ainvoke(
+            {"messages": [{"role": "user", "content": question}]},
+            config=_config(thread_id),
+        )
+    except GraphRecursionError:
+        limit = get_settings().AGENT_RECURSION_LIMIT
+        return (
+            f"本轮 Agent 执行达到安全步数上限（{limit}），已自动停止。"
+            "这通常表示模型或工具调用出现了异常循环。"
+        )
     messages = result.get("messages") or []
     if not messages:
         return ""
@@ -337,7 +364,7 @@ async def _repl(
     console.print(f"会话：{thread_id}", markup=False)
     settings = get_settings()
     console.print(
-        f"环境：{settings.APP_ENV}｜搜索策略：{current_search_provider_name()}",
+        f"环境：{settings.APP_ENV}｜模型：{current_model_provider_name()}｜搜索：{current_search_provider_name()}｜汇率：{current_fx_provider_name()}｜执行上限：{settings.AGENT_RECURSION_LIMIT} steps",
         markup=False,
     )
     console.print(

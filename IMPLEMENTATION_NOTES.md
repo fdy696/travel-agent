@@ -50,3 +50,13 @@ or set the value in `.env`.
 
 `ddgs>=9.14.4` was added to `pyproject.toml`.
 Run `uv sync` after applying this patch; `uv` will refresh `uv.lock` locally.
+
+## 2026-08 Model / Budget / FX integration
+
+- Keep CLI as the only runtime interface for the current stage; no FastAPI layer yet.
+- Model construction moved to `models/factory.py`; `LLM_PROVIDER` is independent from `APP_ENV`.
+- `travel-researcher` keeps only Research tools. Budget and currency tools are Main-only deterministic capabilities.
+- `calculate_budget` has no built-in travel prices. It only aggregates the final selected items and supports ranges / people / categories.
+- `convert_currency` uses a current Frankfurter reference rate outside test mode; test mode is offline and deterministic.
+- Main must not pre-decide JR Pass / other pass economics before Research comparison.
+

@@ -53,7 +53,7 @@ Main 必须调用：
 
 固定链路：
 
-`Main → 必要需求澄清 → travel-planning Skill → Travel Researcher → Research Findings → Markdown Contract → Main Final Synthesis`
+`Main → 必要需求澄清 → travel-planning Skill → Travel Researcher → Research Findings → Main 选定最终方案 → Budget / FX（按需）→ Markdown Contract → Main Final Synthesis`
 
 规划模式下：
 
@@ -152,9 +152,11 @@ Research 必须：
 没有可靠价格时使用区间。
 不要编造未经验证的精确金额。
 若方案可能明显超预算，应主动调整或指出主要超支来源。
+最终路线 / 交通 / 住宿方案确定后，涉及多项费用时使用 `calculate_budget` 做确定性汇总。
+计算器只接收最终采用方案的项目，不得把备选方案价格混入最终预算。
 
 所有金额必须明确币种，不得仅用 "¥" 表示（对中文用户易误读为人民币）。
-当地货币是事实价格；人民币等换算金额只能由 Main 基于汇率换算，不得与事实价混写。
+当地货币是事实价格；人民币等换算金额只能由 Main 通过 `convert_currency` 基于当前参考汇率换算，不得与事实价混写。
 币种表达规则见 Markdown Contract「币种规范」。
 
 ## 6. 创建完整旅行计划
@@ -167,10 +169,11 @@ Research 必须：
 4. 读取本 Skill。
 5. 必须委派 Travel Researcher。
 6. 等待 Research Findings 返回。
-7. Main 根据 conversation、用户约束和 Findings 完成最终路线与每日节奏。
-8. Research 完成后读取 `references/markdown-contract.md`。
-9. 严格按照 Markdown Contract 输出。
-10. 返回完整旅行计划，而不是 Research 摘要或景点清单。
+7. Main 根据 conversation、用户约束和 Findings 选定最终路线、交通、住宿与每日节奏。
+8. 涉及多项费用时调用 `calculate_budget` 汇总最终采用方案；需要人民币等辅助参考时调用 `convert_currency`。
+9. 计算完成后读取 `references/markdown-contract.md`。
+10. 严格按照 Markdown Contract 输出。
+11. 返回完整旅行计划，而不是 Research 摘要或景点清单。
 
 普通旅行问答不要读取 Markdown Contract。
 
@@ -183,8 +186,8 @@ Research 必须：
 3. 保留未被修改的约束、偏好和有效安排。
 4. 必须委派 Travel Researcher Research 受影响的信息。
 5. Main 根据 Findings 检查时间、路线、交通和预算连锁影响。
-6. 必要时重新平衡其他日期。
-7. Research 完成后读取 `references/markdown-contract.md`。
+6. 必要时重新平衡其他日期，并重新调用 `calculate_budget` / `convert_currency` 更新受影响预算。
+7. 计算完成后读取 `references/markdown-contract.md`。
 8. 返回新的完整 Markdown 旅行计划。
 
 不得只返回 Patch、Diff、修改项列表或单独修改后的某一天。
@@ -207,6 +210,7 @@ Research 必须：
 - 当前事实没有被旧年份资料错误替代
 - 没有把未经核验的猜测通过搜索“自证”
 - 预算没有明显违背用户要求
+- 最终预算只汇总实际采用方案，没有混入未采用备选价格
 - 预算模块金额币种明确，未被裸 "¥" 误读为人民币
 - 没有伪造未经验证的精确事实
 - 用户明确要求没有遗漏

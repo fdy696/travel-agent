@@ -1,4 +1,4 @@
-"""暴露给 Main Agent 的旅行工具。
+"""Agent-facing tool surfaces。
 
 底层 API 实现继续复用 v6 已有 search.py / weather.py / route.py。
 这一层只负责：
@@ -12,6 +12,8 @@ from typing import Literal
 
 from langchain_core.tools import tool
 
+from tools.budget import calculate_budget
+from tools.currency import convert_currency
 from tools.route import get_route as _get_route
 from tools.search import search_web
 from tools.weather import get_weather as _get_weather
@@ -66,4 +68,11 @@ TRAVEL_TOOLS = [
     search_travel_info,
     get_weather,
     search_maps,
+]
+
+# Main 在 Research 之后可使用确定性预算计算；Researcher 仍只持有 TRAVEL_TOOLS。
+MAIN_TOOLS = [
+    *TRAVEL_TOOLS,
+    calculate_budget,
+    convert_currency,
 ]

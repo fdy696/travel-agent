@@ -21,13 +21,13 @@ from deepagents import (
     register_harness_profile,
 )
 from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
-from langchain_deepseek import ChatDeepSeek
 from langgraph.types import Checkpointer
 
-from config import get_settings, require_key
+from config import get_settings
 from middleware.runtime_clock import RuntimeClockMiddleware
+from models.factory import build_chat_model
 from subagents.travel_researcher import build_travel_researcher
-from tools.agent_tools import TRAVEL_TOOLS
+from tools.agent_tools import MAIN_TOOLS
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -68,9 +68,13 @@ Main 负责：
 - 在开始 Research 前完成必要的需求澄清；
 - 如果缺失信息会直接改变整体路线、出行日期逻辑、进出城市或其他核心方案，必须先向用户确认，不要先假设并委派 Research；
 - 对不会改变整体方案的非关键偏好，可以采用合理假设；
+- 不要在 Research 前把 JR Pass、城市 Pass、具体交通票券等经济性方案设成默认结论；这类方案必须等 Research 比价后再决定；
 - 条件足够后读取 travel-planning Skill；
 - 把完整旅行规划所需的 Research 委派给 `travel-researcher`；
 - 根据 Research Findings 做最终路线、节奏、预算和取舍判断；
+- 最终方案涉及多项费用时，使用 `calculate_budget` 对“最终采用方案”做确定性汇总，不自行心算总额；
+- 预算计算不得混入未采用的备选交通、Pass、住宿或活动价格；
+- 需要人民币等辅助换算时调用 `convert_currency`，不得自己猜测或记忆汇率；
 - 在 Research 完成后读取 Markdown Contract；
 - 生成或修改最终完整旅行计划。
 
@@ -83,7 +87,7 @@ Main 负责：
 
 都必须使用固定链路：
 
-`Main → 必要需求澄清 → travel-planning Skill → travel-researcher → Research Findings → Markdown Contract → Main Final Synthesis`
+`Main → 必要需求澄清 → travel-planning Skill → travel-researcher → Research Findings → Main 选定最终方案 → Budget / FX（按需）→ Markdown Contract → Main Final Synthesis`
 
 如果关键条件尚不足以确定整体方案，先完成澄清；在关键条件明确之前不要读取 travel-planning Skill，也不要调用 Travel Researcher。
 条件足够后，Travel Researcher 是规划 Research 的固定环节。
@@ -145,6 +149,18 @@ Travel Researcher 是唯一的规划 Research Workspace。
 
 如果用户只是询问当前计划中的某个细节或原因，直接回答，不重新输出整份计划。
 
+# Budget Calculator
+
+`calculate_budget` 是确定性计算 Tool，不负责查价格、不负责决定旅行方案。
+Main 应先根据 Research Findings 选定最终交通 / 住宿 / 活动方案，再把该方案实际采用的费用项目交给计算器。
+预算最终总额和人均总额优先使用计算器结果，避免自行加总或混入备选方案。
+
+# Currency Converter
+
+`convert_currency` 只负责把已确认的当地货币金额按当前参考汇率换算成辅助币种。
+事实价格始终保留当地货币；人民币换算只是参考。
+如果要换算预算中的多个金额，应一次传入，确保使用同一汇率；如果换算失败，则只输出当地货币，不猜汇率。
+
 # Markdown Contract
 
 Markdown Contract 只能在 Travel Researcher 返回 Research Findings 之后，
@@ -162,15 +178,6 @@ Markdown Contract 只能在 Travel Researcher 返回 Research Findings 之后，
 """
 
 
-def _build_llm() -> ChatDeepSeek:
-    return ChatDeepSeek(
-        model=get_settings().CHAT_MODEL,
-        api_key=require_key("DEEPSEEK_API_KEY"),
-        temperature=0.3,
-        max_tokens=32000,
-        max_retries=3,
-        extra_body={"thinking": {"type": "disabled"}},
-    )
 
 
 def _build_backend() -> CompositeBackend:
@@ -188,7 +195,7 @@ def _build_backend() -> CompositeBackend:
 def _disable_builtin_default_subagent() -> None:
     """禁用 Deep Agents 自动附带的默认 SubAgent，只保留业务显式注册的 Travel Researcher。"""
     register_harness_profile(
-        "deepseek",
+        get_settings().LLM_PROVIDER,
         HarnessProfile(
             general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False),
         ),
@@ -199,13 +206,13 @@ def build_agent(*, checkpointer: Checkpointer | None = None):
     """构造 Main Travel Agent。"""
     _disable_builtin_default_subagent()
 
-    model = _build_llm()
+    model = build_chat_model()
     backend = _build_backend()
 
     return create_deep_agent(
         model=model,
         system_prompt=TRAVEL_AGENT_SYSTEM_PROMPT,
-        tools=TRAVEL_TOOLS,
+        tools=MAIN_TOOLS,
         skills=["/skills/"],
         subagents=[build_travel_researcher(model)],
         backend=backend,
